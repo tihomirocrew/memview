@@ -1,9 +1,12 @@
 #include "ui/memory_view.hpp"
 #include "app/app.hpp"
 #include "memory/memory.hpp"
+#include "memory/value_format.hpp"
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* for the layout, FindWindowByName for modals
 #include <cstdio>
+#include <cstdlib> // strtoull for hex value entry
+#include <string>
 
 // The Memory View container: a separate OS window whose dockspace hosts the
 // three panes (Disassembly, Hex View, Memory Regions), which can be dragged
@@ -65,6 +68,198 @@ void drawGotoAddressModal(app::AppState& s, bool& show, char* input,
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         show = false;
+
+    ImGui::End();
+}
+
+// Type-aware write at one byte, opened from the hex grid (double-click / menu).
+void drawHexEditValueModal(app::AppState& s)
+{
+    if (!s.showHexEditValue) return;
+
+    // Center on the Hex View's own OS window; it may be torn out to another monitor.
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (ImGuiWindow* win = ImGui::FindWindowByName("Hex View"))
+        vp = win->Viewport;
+
+    if (!app::beginBlockingModal("Edit Value##hex", &s.showHexEditValue, vp, 360, 0))
+        return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showHexEditValue = false;
+
+    const mem::ValueType vt = app::uiValueType(s.hexEditValueType);
+    const bool utf16 = (vt == mem::ValueType::String && s.hexEditValueEncoding == 1);
+
+    // Hex display/entry is offered for integer types only.
+    const bool isInt = (vt == mem::ValueType::UInt8 || vt == mem::ValueType::Int16 ||
+                        vt == mem::ValueType::Int32 || vt == mem::ValueType::Int64);
+    const bool hexMode = isInt && s.hexEditValueHex;
+
+    // Scalars have a fixed width; String/Pattern use the length field.
+    auto widthFor = [&]() -> size_t {
+        size_t w = mem::value_size(vt);
+        if (w == 0)
+        {
+            int len = s.hexEditValueLength;
+            if (len < 1)   len = 1;
+            if (len > 256) len = 256;
+            w = (size_t)len;
+        }
+        return w;
+    };
+
+    auto readCurrent = [&](std::string& out) -> bool {
+        if (!s.proc.is_open()) return false;
+        uint8_t buf[256] = {};
+        const size_t w = widthFor();
+        if (!mem::read_raw(s.proc, s.hexEditValueAddr, buf, w)) return false;
+        if (hexMode)
+        {
+            uint64_t v = 0; memcpy(&v, buf, w); // w <= 8 for integers
+            char tmp[24];
+            snprintf(tmp, sizeof(tmp), "%llX", (unsigned long long)v);
+            out = tmp;
+        }
+        else
+            out = app::formatValueStr(buf, w, vt, utf16);
+        return true;
+    };
+
+    // Prefill from memory on open and whenever the type/length/encoding/hex
+    // flag changes, since the old text no longer matches the new representation.
+    static int prevType = -1, prevLen = -1, prevEnc = -1, prevHex = -1;
+    if (ImGui::IsWindowAppearing()) { prevType = prevLen = prevEnc = prevHex = -1; }
+    if (prevType != s.hexEditValueType || prevLen != s.hexEditValueLength ||
+        prevEnc != s.hexEditValueEncoding || prevHex != (int)hexMode)
+    {
+        std::string cur;
+        if (readCurrent(cur))
+            snprintf(s.hexEditValueInput, sizeof(s.hexEditValueInput), "%s", cur.c_str());
+        s.hexEditValueError[0] = '\0';
+        prevType = s.hexEditValueType;
+        prevLen  = s.hexEditValueLength;
+        prevEnc  = s.hexEditValueEncoding;
+        prevHex  = (int)hexMode;
+    }
+
+    char lbl[40];
+    app::formatAddrLabel(s, s.hexEditValueAddr, lbl, sizeof(lbl));
+    ImGui::Text("Address: %s", lbl);
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Type");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::Combo("##hexedittype", &s.hexEditValueType,
+        app::kValueTypeNames, app::kValueTypeCount);
+
+    if (isInt)
+    {
+        ImGui::Spacing();
+        ImGui::Checkbox("Hexadecimal", &s.hexEditValueHex);
+    }
+
+    // String/Pattern have no fixed width, so let the user pick how many bytes.
+    if (vt == mem::ValueType::String || vt == mem::ValueType::ArrayOfBytes)
+    {
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Length (bytes)");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputInt("##hexeditlen", &s.hexEditValueLength);
+        if (s.hexEditValueLength < 1)   s.hexEditValueLength = 1;
+        if (s.hexEditValueLength > 256) s.hexEditValueLength = 256;
+    }
+
+    if (vt == mem::ValueType::String)
+    {
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Encoding");
+        ImGui::SetNextItemWidth(-1);
+        const char* encNames[] = { "UTF-8", "UTF-16" };
+        ImGui::Combo("##hexeditenc", &s.hexEditValueEncoding, encNames, 2);
+    }
+
+    // Live readout of what's in memory now, re-read every frame.
+    ImGui::Spacing();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Current:");
+    ImGui::SameLine();
+    {
+        std::string cur;
+        if (readCurrent(cur)) ImGui::TextUnformatted(cur.c_str());
+        else                  ImGui::TextDisabled("Unreadable");
+    }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("New value");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    const bool submit = ImGui::InputText("##hexeditval", s.hexEditValueInput,
+        sizeof(s.hexEditValueInput), ImGuiInputTextFlags_EnterReturnsTrue);
+
+    if (s.hexEditValueError[0])
+        ImGui::TextColored(ImVec4(0.85f, 0.1f, 0.1f, 1.f), "%s", s.hexEditValueError);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    auto doWrite = [&]() {
+        if (!s.proc.is_open())
+        {
+            snprintf(s.hexEditValueError, sizeof(s.hexEditValueError),
+                "No process attached.");
+            return;
+        }
+        uint8_t buf[256] = {};
+        size_t  n = 0;
+        if (hexMode)
+        {
+            // Write the low width bytes of the hex input (raw bit pattern),
+            // so e.g. -1 as 4 Bytes = FFFFFFFF.
+            const size_t w = mem::value_size(vt);
+            char* end = nullptr;
+            const unsigned long long v = strtoull(s.hexEditValueInput, &end, 16);
+            if (end == s.hexEditValueInput)
+            {
+                snprintf(s.hexEditValueError, sizeof(s.hexEditValueError),
+                    "Not a valid hexadecimal number.");
+                return;
+            }
+            memcpy(buf, &v, w);
+            n = w;
+        }
+        else
+        {
+            n = app::parseValue(s.hexEditValueInput, vt, buf, sizeof(buf), utf16);
+            if (n == 0)
+            {
+                snprintf(s.hexEditValueError, sizeof(s.hexEditValueError),
+                    "Couldn't parse the value for this type.");
+                return;
+            }
+        }
+        if (!mem::write_raw(s.proc, s.hexEditValueAddr, buf, n))
+        {
+            snprintf(s.hexEditValueError, sizeof(s.hexEditValueError),
+                "Write failed (err %lu). Address may be unwritable.",
+                (unsigned long)GetLastError());
+            return;
+        }
+        s.showHexEditValue = false;
+    };
+
+    const bool canWrite = s.proc.is_open() && s.hexEditValueInput[0] != '\0';
+    ImGui::BeginDisabled(!canWrite);
+    if (ImGui::Button("Write", ImVec2(120, 0)) || (submit && canWrite))
+        doWrite();
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        s.showHexEditValue = false;
 
     ImGui::End();
 }
@@ -268,6 +463,7 @@ void drawMemoryView(app::AppState& s)
     drawGotoAddressModal(s, s.showGotoHex, s.gotoHexInput,
         sizeof(s.gotoHexInput), s.hexAddr, s.hexHistory,
         "Go to Address##hex", "Hex View");
+    drawHexEditValueModal(s);
 }
 
 } // namespace ui

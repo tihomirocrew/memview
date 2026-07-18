@@ -154,6 +154,17 @@ struct AppState {
     char        findSigError[128] = "";
     ScanSession findSigScan;
 
+    // "Edit Value" modal for the Hex View: a type-aware write at one byte.
+    bool      showHexEditValue       = false;
+    uintptr_t hexEditValueAddr       = 0;
+    uintptr_t hexCtxAddr             = 0;   // byte captured on right-click, for the menu
+    int       hexEditValueType       = 0;   // index into kValueTypeNames (Byte)
+    bool      hexEditValueHex        = false; // show/enter the value as hex (int types)
+    int       hexEditValueEncoding   = 0;   // 0 = UTF-8, 1 = UTF-16 (String only)
+    int       hexEditValueLength     = 8;   // read/write width for String & Pattern
+    char      hexEditValueInput[256] = "";
+    char      hexEditValueError[128] = "";
+
     // "Go to Address" modals, one per pane so a jump in one doesn't move the other.
     bool showGotoDisasm         = false;
     char gotoDisasmInput[128]   = "";

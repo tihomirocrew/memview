@@ -62,6 +62,8 @@ void drawHex(app::AppState& s)
     const ImVec2 avail   = ImGui::GetContentRegionAvail();
     const float  charW   = ImGui::CalcTextSize("0").x;
     const float  hexColX = (labelW + 2) * charW;
+    // ASCII column starts after the 16 hex cells plus the single-space gap.
+    const float  asciiColX = hexColX + (16 * 3 + 1) * charW;
     const float  sbW     = ImGui::GetStyle().ScrollbarSize;
     const float  rowsY0  = origin.y;
 
@@ -74,25 +76,49 @@ void drawHex(app::AppState& s)
         ImVec2(selW > 1.f ? selW : 1.f, avail.y > 1.f ? avail.y : 1.f));
     const bool selPressed = ImGui::IsItemActivated();
     const bool selHeld    = ImGui::IsItemActive();
+    // Double-click is queried on the catcher itself: on the press frame it owns
+    // the ActiveId, so IsWindowHovered() can read false and miss the event.
+    const bool selDblClick = ImGui::IsItemHovered() &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
     ImGui::SetCursorScreenPos(origin);
 
-    // Byte cell under the mouse. `hovAddr` needs a real hit on a hex pair (to
-    // start a selection); `dragAddr` clamps into the dump so a drag keeps
-    // tracking when the mouse strays into the margins or ASCII column.
+    // Hit-test the hex grid and the ASCII column together: both map to the same
+    // byte, so a selection can be started/dragged in either (like Cheat Engine).
+    // hovAddr is an exact hit; dragAddr clamps in so a drag survives the margins.
     const ImVec2 m    = ImGui::GetMousePos();
     const float  relY = m.y - rowsY0;
-    const float  hx   = m.x - origin.x - hexColX;
+    const float  relX = m.x - origin.x;
 
     int r = (int)(relY / lineH);
-    int c = (int)(hx / (3.f * charW));
-    uintptr_t hovAddr = 0;
-    if (relY >= 0.f && r >= 0 && r < rows && hx >= 0.f && c < 16
-        && (hx - c * 3.f * charW) < 2.5f * charW) // not in the cell gap
-        hovAddr = s.hexAddr + (uintptr_t)r * 16 + (uintptr_t)c;
 
+    // Column under the cursor: try the hex pairs first (3 chars/cell, excluding
+    // the inter-cell gap), then the ASCII column (1 char/cell).
+    int hitCol = -1;
+    const float hxHex = relX - hexColX;
+    if (hxHex >= 0.f)
+    {
+        const int ch = (int)(hxHex / (3.f * charW));
+        if (ch < 16 && (hxHex - ch * 3.f * charW) < 2.5f * charW) hitCol = ch;
+    }
+    const float hxAscii = relX - asciiColX;
+    if (hitCol < 0 && hxAscii >= 0.f)
+    {
+        const int ca = (int)(hxAscii / charW);
+        if (ca < 16) hitCol = ca;
+    }
+
+    uintptr_t hovAddr = 0;
+    if (relY >= 0.f && r >= 0 && r < rows && hitCol >= 0)
+        hovAddr = s.hexAddr + (uintptr_t)r * 16 + (uintptr_t)hitCol;
+
+    // Clamped column for drag tracking: use the ASCII grid once the cursor is
+    // at/past its start, else the hex grid.
+    int dragCol = relX >= asciiColX
+        ? (int)((relX - asciiColX) / charW)
+        : (int)((relX - hexColX) / (3.f * charW));
+    dragCol = dragCol < 0 ? 0 : (dragCol > 15 ? 15 : dragCol);
     r = r < 0 ? 0 : (r >= rows ? rows - 1 : r);
-    c = c < 0 ? 0 : (c >= 16 ? 15 : c);
-    const uintptr_t dragAddr = s.hexAddr + (uintptr_t)r * 16 + (uintptr_t)c;
+    const uintptr_t dragAddr = s.hexAddr + (uintptr_t)r * 16 + (uintptr_t)dragCol;
 
     // Click a byte to start a selection, drag to extend; clicking off the cells
     // clears it. The anchor is the fixed end of the drag.
@@ -116,6 +142,14 @@ void drawHex(app::AppState& s)
         }
         else
             s.hexSelecting = false;
+    }
+
+    // Double-click a byte to open the Edit Value modal for it.
+    if (selDblClick && hovAddr)
+    {
+        s.hexEditValueAddr     = hovAddr;
+        s.hexEditValueError[0] = '\0';
+        s.showHexEditValue     = true;
     }
 
     if (ImGui::IsWindowHovered())
@@ -145,10 +179,13 @@ void drawHex(app::AppState& s)
         if (s.hexSelStart &&
             ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C))
             copyHexSelection(s);
-    }
 
-    // ASCII column starts after the 16 hex cells plus the single-space gap.
-    const float asciiColX = hexColX + (16 * 3 + 1) * charW;
+        // Capture the byte on right-click: once the menu item runs the mouse has
+        // left the grid, so hovAddr is stale. Fall back to the selection/drag cell.
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+            s.hexCtxAddr = hovAddr ? hovAddr
+                         : (s.hexSelStart ? s.hexSelStart : dragAddr);
+    }
 
     for (int r = 0; r < rows; ++r)
     {
@@ -212,6 +249,12 @@ void drawHex(app::AppState& s)
             goBack(s.hexHistory, s.hexAddr);
         if (ImGui::MenuItem("Copy Bytes", "Ctrl+C", false, s.hexSelStart != 0))
             copyHexSelection(s);
+        if (ImGui::MenuItem("Edit Value...", nullptr, false, s.hexCtxAddr != 0))
+        {
+            s.hexEditValueAddr     = s.hexCtxAddr;
+            s.hexEditValueError[0] = '\0';
+            s.showHexEditValue     = true;
+        }
 
         ImGui::Separator();
         // IDA-style sync: follow Disassembly's address. The snap on toggle-on
