@@ -46,7 +46,7 @@ void drawGotoAddressModal(app::AppState& s, bool& show, char* input,
     // clicks on Go/Cancel.
     if (ImGui::IsWindowAppearing())
         ImGui::SetKeyboardFocusHere();
-    const bool submit = ImGui::InputText("##gotoaddrinput", input, inputSize,
+    const bool submit = app::addrInput(s, "##gotoaddrinput", input, inputSize,
         ImGuiInputTextFlags_EnterReturnsTrue);
 
     ImGui::Spacing();
@@ -319,7 +319,7 @@ void drawMemoryView(app::AppState& s)
     ImGui::TextUnformatted("Go to");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(200);
-    const bool go = ImGui::InputText("##goto", s.memGotoInput,
+    const bool go = app::addrInput(s, "##goto", s.memGotoInput,
         sizeof(s.memGotoInput), ImGuiInputTextFlags_EnterReturnsTrue);
 
     ImGui::SameLine();

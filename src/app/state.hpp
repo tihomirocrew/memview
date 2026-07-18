@@ -165,6 +165,11 @@ struct AppState {
     char      hexEditValueInput[256] = "";
     char      hexEditValueError[128] = "";
 
+    // Module-name autocomplete shared by every address input. Only one field is
+    // focused at a time, so a single owner id + highlighted row is enough.
+    unsigned int addrAcOwner     = 0; // ImGui id of the input owning the dropdown
+    int          addrAcHighlight = 0; // selected suggestion row
+
     // "Go to Address" modals, one per pane so a jump in one doesn't move the other.
     bool showGotoDisasm         = false;
     char gotoDisasmInput[128]   = "";

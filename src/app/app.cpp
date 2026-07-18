@@ -610,6 +610,170 @@ bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
     return true;
 }
 
+namespace {
+
+// Modules whose name starts with the term under the cursor (case-insensitive).
+// Reports that term's span in `buf`; returns the match count, capped at maxOut.
+int collectModuleMatches(const AppState& s, const char* buf, int cursor,
+    int& termStart, int& termLen, int* idx, int maxOut)
+{
+    int start = cursor;
+    while (start > 0 && !isTermBoundary(buf[start - 1])) --start;
+    int end = cursor;
+    while (buf[end] != '\0' && !isTermBoundary(buf[end])) ++end;
+    termStart = start;
+    termLen   = end - start;
+    if (termLen <= 0) return 0;
+
+    int n = 0;
+    for (int i = 0; i < (int)s.modules.size() && n < maxOut; ++i)
+    {
+        const std::string& name = s.modules[i].name;
+        if ((int)name.size() >= termLen &&
+            _strnicmp(buf + termStart, name.c_str(), (size_t)termLen) == 0)
+            idx[n++] = i;
+    }
+    return n;
+}
+
+// Shared with the InputText callback: Tab reads `highlight`, the callback writes
+// back the cursor and whether it inserted a completion.
+struct AddrAcCtx {
+    const AppState* s;
+    int  highlight;
+    int  cursor;
+    bool accepted;
+};
+
+int addrAcCallback(ImGuiInputTextCallbackData* data)
+{
+    AddrAcCtx* ctx = (AddrAcCtx*)data->UserData;
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackAlways)
+    {
+        ctx->cursor = data->CursorPos;
+    }
+    else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion)
+    {
+        int ts = 0, tl = 0, idx[12];
+        const int n = collectModuleMatches(*ctx->s, data->Buf, data->CursorPos,
+            ts, tl, idx, 12);
+        if (n > 0)
+        {
+            int sel = ctx->highlight;
+            if (sel < 0 || sel >= n) sel = 0;
+            const std::string& name = ctx->s->modules[idx[sel]].name;
+            data->DeleteChars(ts, tl);
+            data->InsertChars(ts, name.c_str());
+            ctx->accepted = true;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
+    int flags, bool* deactivatedAfterEdit, bool* accepted)
+{
+    const ImGuiID itemId = ImGui::GetID(id);
+
+    AddrAcCtx ctx;
+    ctx.s         = &s;
+    ctx.cursor    = -1;
+    ctx.accepted  = false;
+    ctx.highlight = (s.addrAcOwner == itemId) ? s.addrAcHighlight : 0;
+
+    const bool submit = ImGui::InputText(id, buf, bufSize,
+        (ImGuiInputTextFlags)flags | ImGuiInputTextFlags_CallbackAlways |
+        ImGuiInputTextFlags_CallbackCompletion, addrAcCallback, &ctx);
+
+    // Grab the field's state before the dropdown becomes the caller's "last item".
+    if (deactivatedAfterEdit) *deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+    const bool   active  = ImGui::IsItemActive();
+    const ImVec2 itemMin = ImGui::GetItemRectMin();
+    const ImVec2 itemMax = ImGui::GetItemRectMax();
+    const ImGuiLastItemData savedItem = ImGui::GetCurrentContext()->LastItemData;
+
+    int termStart = 0, termLen = 0, idx[12];
+    int n = 0;
+    if (active && ctx.cursor >= 0)
+        n = collectModuleMatches(s, buf, ctx.cursor, termStart, termLen, idx, 12);
+
+    // Skip a lone suggestion that just echoes a fully-typed name.
+    if (n == 1)
+    {
+        const std::string& only = s.modules[idx[0]].name;
+        if ((int)only.size() == termLen &&
+            _strnicmp(buf + termStart, only.c_str(), (size_t)termLen) == 0)
+            n = 0;
+    }
+
+    if (!active || n == 0)
+    {
+        if (s.addrAcOwner == itemId) { s.addrAcOwner = 0; s.addrAcHighlight = 0; }
+        if (accepted) *accepted = ctx.accepted;
+        return submit;
+    }
+
+    if (s.addrAcOwner != itemId) { s.addrAcOwner = itemId; s.addrAcHighlight = 0; }
+    int& hl = s.addrAcHighlight;
+    if (hl >= n) hl = n - 1;
+    if (hl < 0)  hl = 0;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) hl = (hl + 1) % n;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))   hl = (hl + n - 1) % n;
+
+    // Replace the term with `name`, staying within bufSize.
+    auto splice = [&](const std::string& name)
+    {
+        const int oldLen  = (int)strlen(buf);
+        const int tailLen = oldLen - (termStart + termLen);
+        int nameLen = (int)name.size();
+        if (termStart + nameLen + tailLen + 1 > (int)bufSize)
+            nameLen = (int)bufSize - 1 - termStart - tailLen;
+        if (nameLen < 0) nameLen = 0;
+        memmove(buf + termStart + nameLen, buf + termStart + termLen, (size_t)tailLen);
+        memcpy(buf + termStart, name.c_str(), (size_t)nameLen);
+        buf[termStart + nameLen + tailLen] = '\0';
+    };
+
+    // Borderless list under the field, raised over the modal without stealing
+    // focus. Screen-space pos + the input's viewport keep it right when torn out.
+    ImGui::SetNextWindowViewport(ImGui::GetWindowViewport()->ID);
+    ImGui::SetNextWindowPos(ImVec2(itemMin.x, itemMax.y));
+    ImGui::SetNextWindowSize(ImVec2(itemMax.x - itemMin.x, 0.f));
+    const ImGuiWindowFlags wflags =
+        ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove        | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNavInputs   | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoDocking     | ImGuiWindowFlags_AlwaysAutoResize;
+
+    char winId[64];
+    snprintf(winId, sizeof(winId), "##addrac_%08X", (unsigned)itemId);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2, 2));
+    ImGui::Begin(winId, nullptr, wflags);
+    ImGuiWindow* acWin = ImGui::GetCurrentWindow();
+    for (int i = 0; i < n; ++i)
+    {
+        ImGui::PushID(i);
+        if (ImGui::Selectable(s.modules[idx[i]].name.c_str(), i == hl))
+        {
+            splice(s.modules[idx[i]].name);
+            ctx.accepted = true;
+        }
+        ImGui::PopID();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::BringWindowToDisplayFront(acWin);
+
+    // Hand the field back as the caller's "last item".
+    ImGui::GetCurrentContext()->LastItemData = savedItem;
+
+    if (accepted) *accepted = ctx.accepted;
+    return submit;
+}
+
 void addAddyAddress(AppState& s, uintptr_t address)
 {
     for (const auto& w : s.addyList)

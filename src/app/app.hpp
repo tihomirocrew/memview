@@ -74,6 +74,13 @@ void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n);
 // match case-insensitively. Returns false if nothing resolves.
 bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out);
 
+// Like ImGui::InputText, plus a module-name autocomplete dropdown (case-insensitive
+// prefix; Tab/click to accept, Up/Down to choose). `flags` are ImGuiInputTextFlags.
+// Optional outs: `deactivatedAfterEdit` mirrors IsItemDeactivatedAfterEdit() for the
+// field; `accepted` is set the frame a suggestion is inserted into `buf`.
+bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
+    int flags, bool* deactivatedAfterEdit = nullptr, bool* accepted = nullptr);
+
 // Assemble s.asmInput at s.asmAddress and write it into the target. Closes the
 // modal on success; leaves it open with s.asmError on failure.
 bool assembleAndWrite(AppState& s);

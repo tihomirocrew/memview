@@ -90,9 +90,11 @@ void drawAddyList(app::AppState& s)
             char addrBuf[128];
             snprintf(addrBuf, sizeof(addrBuf), "%08llX", (unsigned long long)e.address);
             snprintf(id, sizeof(id), "##addr%d", i);
-            ImGui::InputText(id, addrBuf, sizeof(addrBuf));
+            bool addrDeact = false, addrAccepted = false;
+            app::addrInput(s, id, addrBuf, sizeof(addrBuf), 0, &addrDeact, &addrAccepted);
 
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            // Commit on blur or when a suggestion is picked.
+            if (addrDeact || addrAccepted)
             {
                 uintptr_t parsed = 0;
                 if (app::parseAddrExpr(s, addrBuf, parsed))
@@ -296,7 +298,7 @@ void drawAddAddressModal(app::AppState& s)
 
     ImGui::TextUnformatted("Address");
     ImGui::SetNextItemWidth(-1);
-    bool submit = ImGui::InputText("##addaddr", s.addAddrInput, sizeof(s.addAddrInput),
+    bool submit = app::addrInput(s, "##addaddr", s.addAddrInput, sizeof(s.addAddrInput),
         ImGuiInputTextFlags_EnterReturnsTrue);
 
     ImGui::Spacing();
