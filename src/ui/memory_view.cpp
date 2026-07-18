@@ -37,7 +37,7 @@ void drawGotoAddressModal(app::AppState& s, bool& show, char* input,
         ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         show = false;
 
-    ImGui::TextUnformatted("Address (hex), or module+offset");
+    ImGui::TextUnformatted("Address");
     ImGui::SetNextItemWidth(-1);
     // Focus the input only on the frame it appears; every frame would fight
     // clicks on Go/Cancel.
@@ -126,8 +126,7 @@ void drawMemoryView(app::AppState& s)
     ImGui::SetNextItemWidth(200);
     const bool go = ImGui::InputText("##goto", s.memGotoInput,
         sizeof(s.memGotoInput), ImGuiInputTextFlags_EnterReturnsTrue);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Hex address, or module+offset");
+
     ImGui::SameLine();
     uintptr_t gotoAddr = 0;
     const bool gotoValid = s.memGotoInput[0] && app::parseAddrExpr(s, s.memGotoInput, gotoAddr);

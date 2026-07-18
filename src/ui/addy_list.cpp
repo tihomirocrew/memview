@@ -294,7 +294,7 @@ void drawAddAddressModal(app::AppState& s)
         ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         s.showAddAddr = false;
 
-    ImGui::TextUnformatted("Address (hex), or module+offset");
+    ImGui::TextUnformatted("Address");
     ImGui::SetNextItemWidth(-1);
     bool submit = ImGui::InputText("##addaddr", s.addAddrInput, sizeof(s.addAddrInput),
         ImGuiInputTextFlags_EnterReturnsTrue);

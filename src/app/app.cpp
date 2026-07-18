@@ -12,6 +12,7 @@
 #include <imgui_internal.h> // DockBuilder* for the root dockspace layout
 #include <Zydis/Zydis.h>    // decode overwritten instructions for NOP-pad sizing
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -519,55 +520,93 @@ void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n)
 
 namespace {
 
-std::string trim(const std::string& in)
+// True where a term ends: string end, whitespace, or a +/- operator.
+bool isTermBoundary(char c)
 {
-    size_t b = 0, e = in.size();
-    while (b < e && std::isspace((unsigned char)in[b])) ++b;
-    while (e > b && std::isspace((unsigned char)in[e - 1])) --e;
-    return in.substr(b, e - b);
+    return c == '\0' || c == '+' || c == '-' || std::isspace((unsigned char)c);
 }
 
-// Case-insensitive module lookup by name.
-const mem::ModuleEntry* findModuleByName(const AppState& s, const std::string& name)
+// If a loaded module name matches at `p` (case-insensitive, ending on a term
+// boundary), consume it and return its base. Matches the full name including
+// any dashes, so "api-ms-win-...dll" isn't mistaken for a subtraction.
+bool matchModuleAt(const AppState& s, const char* p, uintptr_t& base,
+    const char*& next)
 {
     for (const mem::ModuleEntry& m : s.modules)
-        if (_stricmp(m.name.c_str(), name.c_str()) == 0)
-            return &m;
-    return nullptr;
+    {
+        const size_t len = m.name.size();
+        if (len && _strnicmp(p, m.name.c_str(), len) == 0 &&
+            isTermBoundary(p[len]))
+        {
+            base = m.base;
+            next = p + len;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
 
+// Evaluates an address expression: a sum/difference of terms, where each term
+// is either a loaded module name (resolved to its base) or a hex number. So
+// "module.dll+1A", "40000+8-4", "module+10+20" and a bare "7FF6..." all parse.
 bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
 {
-    const char* plusPos = strchr(text, '+');
-    const std::string head = trim(
-        plusPos ? std::string(text, (size_t)(plusPos - text)) : std::string(text));
-    if (head.empty()) return false;
+    const char* p = text;
+    auto skipws = [&] { while (std::isspace((unsigned char)*p)) ++p; };
 
-    if (const mem::ModuleEntry* m = findModuleByName(s, head))
+    uintptr_t acc  = 0;
+    int       sign = 1;   // sign to apply to the next term
+    bool      any  = false;
+
+    skipws();
+    for (;;)
     {
-        uintptr_t offset = 0;
-        if (plusPos)
+        // A binary operator joins terms; a leading operator is rejected (an
+        // address expression must start with a term).
+        if (*p == '+' || *p == '-')
         {
-            const std::string tail = trim(std::string(plusPos + 1));
-            if (!tail.empty())
-            {
-                char* end = nullptr;
-                offset = (uintptr_t)strtoull(tail.c_str(), &end, 16);
-                if (end == tail.c_str() || *end != '\0') return false;
-            }
+            if (!any) return false;
+            if (*p == '-') sign = -sign;
+            ++p;
+            skipws();
         }
-        out = m->base + offset;
-        return true;
+        else if (any)
+        {
+            break; // no more operators: expression is complete
+        }
+
+        uintptr_t term = 0;
+        const char* next = nullptr;
+        if (matchModuleAt(s, p, term, next))
+        {
+            p = next;
+        }
+        else
+        {
+            // A hex term must begin with a hex digit. This rejects strtoull's
+            // own leading +/- (so "40000+-8" and "40000++8" don't slip through
+            // as sign-wrapped values) and any other stray character.
+            if (!std::isxdigit((unsigned char)*p)) return false;
+            char* end = nullptr;
+            errno = 0;
+            term = (uintptr_t)strtoull(p, &end, 16);
+            if (end == p || errno == ERANGE) return false; // not hex, or overflow
+            p = end;
+        }
+
+        acc += (sign >= 0) ? term : (uintptr_t)0 - term;
+        sign = 1;
+        any  = true;
+        skipws();
+
+        if (*p == '\0') break;
+        if (*p != '+' && *p != '-') return false; // trailing garbage
     }
 
-    if (plusPos) return false; // unknown module, no base to add the offset to
-
-    char* end = nullptr;
-    const uintptr_t v = (uintptr_t)strtoull(head.c_str(), &end, 16);
-    if (end == head.c_str() || *end != '\0') return false;
-    out = v;
+    if (!any) return false;
+    out = acc;
     return true;
 }
 
