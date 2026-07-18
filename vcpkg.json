@@ -1,0 +1,11 @@
+{
+  "name": "memview",
+  "dependencies": [
+    {
+      "name": "imgui",
+      "features": ["win32-binding", "dx11-binding", "docking-experimental"]
+    },
+    "zydis",
+    "nlohmann-json"
+  ]
+}

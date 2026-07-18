@@ -1,0 +1,95 @@
+#pragma once
+#include "app/state.hpp"
+
+namespace app {
+
+// Owns the shared state and draws one UI frame.
+class App {
+public:
+    // Apply the light theme + style tweaks (once, after context init).
+    void setupStyle();
+
+    // Build the UI for the current frame.
+    void drawFrame();
+
+    AppState& state() { return state_; }
+
+private:
+    AppState state_;
+};
+
+// --- Actions shared between UI panels (implemented in app.cpp) --------------
+
+// Switch between the light/dark color scheme, reapplying setupStyle()'s tweaks.
+void applyTheme(AppState& s, bool dark);
+
+// Disassembly syntax colors (packed IM_COL32). Kept small; punctuation stays
+// in the theme text color so the listing doesn't turn into a christmas tree.
+struct DisasmPalette {
+    uint32_t mnemonic; // regular mnemonics + prefixes (rep, lock, ...)
+    uint32_t reg;      // registers
+    uint32_t num;      // immediates, displacements and raw addresses
+    uint32_t sym;      // resolved "module+offset" symbols (label color)
+    uint32_t call;     // call/ret mnemonics
+    uint32_t jump;     // jmp/jcc mnemonics
+};
+
+// Palette for the active theme: x64dbg Dark on dark, the same hues darkened on
+// light (derived from s.darkTheme).
+const DisasmPalette& disasmPalette(const AppState& s);
+
+// Parse the scan inputs and kick off a first/next scan.
+void startFirstScan(AppState& s);
+void startNextScan(AppState& s);
+
+// Attach to a process: open a handle, update the label, reset the scan. Returns
+// false on failure, with s.attachError set for the picker to show.
+bool attachToProcess(AppState& s, const mem::ProcessEntry& entry);
+
+// Copy a scan result (by display index) into the addy list.
+void addAddyFromResult(AppState& s, int displayIndex);
+
+// Copy every selected scan result into the addy list.
+void addSelectedResultsToAddy(AppState& s);
+
+// Open Memory View at the target's main module, picking x86/x64 from bitness.
+void openMemoryView(AppState& s);
+
+// Open Memory View and jump both panes to `address`.
+void openMemoryViewAt(AppState& s, uintptr_t address);
+
+// Add an addy-list entry for a raw address (used by the disasm context menu).
+void addAddyAddress(AppState& s, uintptr_t address);
+
+// The module `addr` falls inside, or nullptr (heap, stack, private mappings).
+const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr);
+
+// Label `addr` as "module+offset" inside a loaded module, else raw hex.
+void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n);
+
+// Parse a "Go to"/"Add Address" expression: plain hex, a module name (its base),
+// or "module+offset" with a hex offset, e.g. "notepad.exe+1a2b". Module names
+// match case-insensitively. Returns false if nothing resolves.
+bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out);
+
+// Assemble s.asmInput at s.asmAddress and write it into the target. Closes the
+// modal on success; leaves it open with s.asmError on failure.
+bool assembleAndWrite(AppState& s);
+
+// Resolve the NOP-pad prompt: write the bytes stashed by assembleAndWrite. If
+// padWithNops, pad the tail up to s.asmNopCoverLen. Closes the modals.
+bool commitAsmBytes(AppState& s, bool padWithNops);
+
+// Parse the hex bytes in s.opcodeInput and write them at s.opcodeAddress
+// (whitespace-tolerant). Short edits pad the tail with NOPs up to s.opcodeOrigLen.
+// Closes the modal on success; leaves it open with s.opcodeError on failure.
+bool changeOpcodeAndWrite(AppState& s);
+
+// Overwrite `length` bytes at `address` with single-byte 0x90 NOPs.
+void nopFill(AppState& s, uintptr_t address, size_t length);
+
+// (Re)generate the signature for s.sigAddress in style s.sigStyle, filling
+// s.sigOutput/s.sigUnique. Called when the modal opens or its style changes.
+void generateSignature(AppState& s);
+
+} // namespace app

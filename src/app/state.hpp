@@ -1,0 +1,169 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+#include "memory/memory.hpp"
+#include "memory/scan_session.hpp"
+
+namespace app {
+
+// A user-tracked address (a row in the addy list).
+struct AddyEntry {
+    char      desc[64];
+    uintptr_t address;
+    int       typeIdx;        // index into kValueTypeNames
+    int       stringEncoding = 0; // 0 = UTF-8, 1 = UTF-16 (used only for String)
+    int       length = 8;     // read/display width in bytes, for String & Pattern
+    char      value[128];
+    bool      frozen;
+
+    // Feedback for the last manual write attempt (0=none, 1=ok, 2=failed).
+    int       writeStatus = 0;
+};
+
+// Shared application state, passed by reference to the UI draw functions.
+struct AppState {
+    mem::Process proc;
+    char         processLabel[256] = "No process selected";
+    std::string  procIconPath;      // exe path of the attached process, for the toolbar icon
+
+    // Scan inputs (bound to the controls on the right panel).
+    char scanValue[4096] = "";  // large enough for long AOB signatures
+    char scanValue2[64]  = "";  // upper bound, used only by the "Value between" scan type
+    int  scanType      = 0;   // index into kScanTypeNames
+    int  valueType     = 2;   // index into kValueTypeNames (default: 4 Bytes)
+
+    // Tri-state page-protection filters (mem::TriState as int):
+    // 0 = don't care, 1 = only, 2 = exclude.
+    int  writableFilter   = 1;  // default: writable only
+    int  executableFilter = 0;
+
+    // String-scan options (used only when valueType == String).
+    bool stringCaseSensitive = true;
+    int  stringEncoding      = 0;   // 0 = UTF-8/ASCII, 1 = UTF-16 (LE)
+
+    ScanSession scan;
+
+    // Selection over the current scan results (parallel to scan.results()).
+    std::vector<char> resultSel;      // 1 = selected
+    int               selAnchor = -1; // last clicked row, for Shift-range
+
+    std::vector<AddyEntry> addyList;
+
+    // Process picker modal.
+    bool                           showProcPicker  = false;
+    std::vector<mem::ProcessEntry> procList;
+    char                           procFilter[128] = "";
+    int                            procSelected    = -1;
+    double                         procNextRefresh = 0.0; // ImGui::GetTime() of next auto-refresh
+    char                           attachError[160] = ""; // set by attachToProcess on failure; shown in the picker
+    bool                           wasProcPickerOpen = false; // tracks open->closed edge, to clear attachError on (re)open
+
+    // Add-address modal. Input is a hex address or "module.exe+offset".
+    bool showAddAddr        = false;
+    char addAddrInput[128]  = "";
+    char addAddrDesc[64]    = "No description";
+    int  addAddrType        = 2;   // default: 4 Bytes
+    int  addAddrStringEncoding = 0; // 0 = UTF-8, 1 = UTF-16 (used only for String)
+    int  addAddrLength      = 8;   // read/display width, for String & Pattern
+
+    // "Clear all addresses" confirmation modal.
+    bool showClearAddy      = false;
+
+    // Settings window.
+    bool showSettings = false;
+    bool darkTheme    = false;  // false = light theme (default), true = dark
+
+    // Memory View window. Both panes navigate independently; the Go bar seeds both.
+    bool      showMemView  = false;
+    uintptr_t disasmAddr   = 0;      // first visible disasm line
+    uintptr_t hexAddr      = 0;      // first visible hex row
+    // Selected disasm row, keyed by address so the highlight tracks scrolling
+    // (0 = none). Ctrl+C copies it.
+    uintptr_t disasmSelAddr = 0;
+    // Hex byte selection: inclusive address range (0/0 = none). Anchor is the
+    // fixed end of a drag; keyed by address so it tracks scrolling.
+    uintptr_t hexSelStart  = 0;
+    uintptr_t hexSelEnd    = 0;
+    uintptr_t hexSelAnchor = 0;
+    bool      hexSelecting = false;
+    // Disassembly scrollbar range. Recomputed while idle (module > region >
+    // 64 KB fallback); frozen while dragging so the mapping can't shift.
+    uintptr_t disasmSbBase = 0;
+    size_t    disasmSbSize = 0;
+    bool      disasmSbDrag = false;
+    // Same, for the Hex View scrollbar.
+    uintptr_t hexSbBase = 0;
+    size_t    hexSbSize = 0;
+    bool      hexSbDrag = false;
+
+    // IDA-style pane sync toggles: each pane follows the other's address; both
+    // on = two-way lock. prev* are last frame's addresses, to detect which moved.
+    bool      syncDisasmToHex = false; // Disassembly follows Hex View
+    bool      syncHexToDisasm = false; // Hex View follows Disassembly
+    uintptr_t prevDisasmAddr  = 0;
+    uintptr_t prevHexAddr     = 0;
+    int       memViewArch  = 0;      // 0 = x64, 1 = x86 (auto-detected)
+    // Hex address or "module.exe+offset" expression.
+    char      memGotoInput[128] = "";
+
+    // Memory Regions panel: committed regions, refreshed periodically.
+    std::vector<mem::Region> memRegions;
+    double                   regionsNextRefresh = 0.0;
+
+    // Loaded modules, used to label addresses as "module+offset".
+    std::vector<mem::ModuleEntry> modules;
+    double                        modulesNextRefresh = 0.0;
+
+    // Assemble modal (right-click a Disassembly row -> Assemble).
+    bool      showAssemble    = false;
+    uintptr_t asmAddress      = 0;
+    char      asmInput[256]   = "";
+    char      asmError[128]   = "";
+
+    // NOP-pad confirmation: shown when the assembled code is shorter than the
+    // instruction(s) it overwrites (Yes = pad tail, No = write as-is, Cancel).
+    // The assembled bytes wait here meanwhile.
+    bool      showAsmNopConfirm = false;
+    size_t    asmNopNewLen      = 0;   // length of the assembled code
+    size_t    asmNopCoverLen    = 0;   // length of the overwritten instruction(s)
+    size_t    asmNopByteCount   = 0;
+    uint8_t   asmNopBytes[32]   = {};
+
+    // Change-opcode modal: type raw instruction bytes as hex, written directly.
+    // opcodeOrigLen is the original instruction length, to pad short edits.
+    bool      showChangeOpcode  = false;
+    uintptr_t opcodeAddress     = 0;
+    size_t    opcodeOrigLen     = 0;
+    char      opcodeInput[256]  = "";
+    char      opcodeError[128]  = "";
+
+    // Create-Signature modal. sigStyle 0 = IDA, 1 = Code.
+    bool      showSignature   = false;
+    uintptr_t sigAddress      = 0;
+    int       sigStyle        = 0;
+    bool      sigUnique       = false;
+    char      sigOutput[512]  = "";
+
+    // Find-Signature modal: scan the whole address space for a pasted pattern
+    // and jump Disassembly to the first match. Separate from `scan` so the
+    // results panel is left untouched.
+    bool        showFindSig       = false;
+    bool        findSigPending    = false; // a find scan is in flight
+    char        findSigInput[512] = "";
+    char        findSigError[128] = "";
+    ScanSession findSigScan;
+
+    // "Go to Address" modals, one per pane so a jump in one doesn't move the other.
+    bool showGotoDisasm         = false;
+    char gotoDisasmInput[128]   = "";
+    bool showGotoHex            = false;
+    char gotoHexInput[128]      = "";
+
+    // Back-button history. Each pane keeps its own stack, pushed right before
+    // that pane's address changes.
+    std::vector<uintptr_t> disasmHistory;
+    std::vector<uintptr_t> hexHistory;
+};
+
+} // namespace app

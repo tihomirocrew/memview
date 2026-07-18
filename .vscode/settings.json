@@ -1,0 +1,6 @@
+{
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build/release"
+    ]
+}
