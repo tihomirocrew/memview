@@ -30,29 +30,12 @@ void drawGotoAddressModal(app::AppState& s, bool& show, char* input,
     if (ImGuiWindow* win = ImGui::FindWindowByName(anchorWindow))
         vp = win->Viewport;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##goto_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup(popupId);
-
-    if (!ImGui::BeginPopupModal(popupId, &show,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal(popupId, &show, vp, 340, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        show = false;
 
     ImGui::TextUnformatted("Address (hex), or module+offset");
     ImGui::SetNextItemWidth(-1);
@@ -83,7 +66,7 @@ void drawGotoAddressModal(app::AppState& s, bool& show, char* input,
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         show = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 } // namespace

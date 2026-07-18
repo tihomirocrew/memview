@@ -1,6 +1,8 @@
 #pragma once
 #include "app/state.hpp"
 
+struct ImGuiViewport;
+
 namespace app {
 
 // Owns the shared state and draws one UI frame.
@@ -91,5 +93,12 @@ void nopFill(AppState& s, uintptr_t address, size_t length);
 // (Re)generate the signature for s.sigAddress in style s.sigStyle, filling
 // s.sigOutput/s.sigUnique. Called when the modal opens or its style changes.
 void generateSignature(AppState& s);
+
+// A modal that blocks only its own viewport, used like BeginPopupModal/EndPopup.
+// The real thing freezes every window in every OS viewport, so a dialog in the
+// main window also locks up a torn-out Memory View. `vp` is the viewport to
+// block and center on; width/height <= 0 auto-size that axis.
+bool beginBlockingModal(const char* title, bool* p_open,
+                        const ImGuiViewport* vp, float width, float height);
 
 } // namespace app

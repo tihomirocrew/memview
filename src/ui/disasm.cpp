@@ -626,30 +626,12 @@ void drawAssembleModal(app::AppState& s)
     if (ImGuiWindow* disasmWin = ImGui::FindWindowByName("Disassembly"))
         vp = disasmWin->Viewport;
 
-    // Draw our own dim behind the modal (the built-in one is off; see setupStyle()).
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##asm_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup("Assemble");
-
-    if (!ImGui::BeginPopupModal("Assemble", &s.showAssemble,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Assemble", &s.showAssemble, vp, 420, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showAssemble = false;
 
     ImGui::Text("Address: %016llX", (unsigned long long)s.asmAddress);
 
@@ -680,7 +662,7 @@ void drawAssembleModal(app::AppState& s)
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         s.showAssemble = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 // --- Assemble NOP-pad confirmation -------------------------------------------
@@ -689,39 +671,23 @@ void drawAsmNopConfirm(app::AppState& s)
 {
     if (!s.showAsmNopConfirm) return;
 
-    // Anchor/dim on Disassembly's OS window (see drawAssembleModal).
+    // Anchor on Disassembly's OS window (see drawAssembleModal).
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     if (ImGuiWindow* disasmWin = ImGui::FindWindowByName("Disassembly"))
         vp = disasmWin->Viewport;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##asmnop_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup("Confirmation##asmnop");
-
     // The X cancels: it aborts the write and doesn't reopen the Assemble box.
     bool open = true;
-    const bool visible = ImGui::BeginPopupModal("Confirmation##asmnop", &open,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    const bool visible = app::beginBlockingModal("Confirmation##asmnop", &open,
+        vp, 440, 0);
     if (!open)
         s.showAsmNopConfirm = false;
     if (!visible)
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showAsmNopConfirm = false;
 
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 420.f);
     ImGui::Text(
@@ -742,7 +708,7 @@ void drawAsmNopConfirm(app::AppState& s)
     if (ImGui::Button("No", ImVec2(110, 0)))
         app::commitAsmBytes(s, false);
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 // --- Change-opcode modal -----------------------------------------------------
@@ -751,34 +717,17 @@ void drawChangeOpcodeModal(app::AppState& s)
 {
     if (!s.showChangeOpcode) return;
 
-    // Anchor/dim on Disassembly's OS window (see drawAssembleModal).
+    // Anchor on Disassembly's OS window (see drawAssembleModal).
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     if (ImGuiWindow* disasmWin = ImGui::FindWindowByName("Disassembly"))
         vp = disasmWin->Viewport;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##opcode_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup("Change opcode");
-
-    if (!ImGui::BeginPopupModal("Change opcode", &s.showChangeOpcode,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Change opcode", &s.showChangeOpcode, vp, 420, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showChangeOpcode = false;
 
     ImGui::Text("Address: %016llX", (unsigned long long)s.opcodeAddress);
 
@@ -809,7 +758,7 @@ void drawChangeOpcodeModal(app::AppState& s)
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         s.showChangeOpcode = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 // --- Create Signature modal --------------------------------------------------
@@ -818,34 +767,17 @@ void drawSignatureModal(app::AppState& s)
 {
     if (!s.showSignature) return;
 
-    // Anchor/dim on Disassembly's OS window (see drawAssembleModal).
+    // Anchor on Disassembly's OS window (see drawAssembleModal).
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     if (ImGuiWindow* disasmWin = ImGui::FindWindowByName("Disassembly"))
         vp = disasmWin->Viewport;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##sig_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup("Create Signature");
-
-    if (!ImGui::BeginPopupModal("Create Signature", &s.showSignature,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Create Signature", &s.showSignature, vp, 480, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showSignature = false;
 
     ImGui::Text("Address: %016llX", (unsigned long long)s.sigAddress);
 
@@ -876,7 +808,7 @@ void drawSignatureModal(app::AppState& s)
     if (ImGui::Button("Close", ImVec2(120, 0)))
         s.showSignature = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 // --- Find Signature modal ----------------------------------------------------
@@ -909,34 +841,17 @@ void drawFindSignatureModal(app::AppState& s)
 
     if (!s.showFindSig) return;
 
-    // Anchor/dim on Disassembly's OS window (see drawAssembleModal).
+    // Anchor on Disassembly's OS window (see drawAssembleModal).
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     if (ImGuiWindow* disasmWin = ImGui::FindWindowByName("Disassembly"))
         vp = disasmWin->Viewport;
 
-    ImGui::SetNextWindowPos(vp->Pos);
-    ImGui::SetNextWindowSize(vp->Size);
-    ImGui::SetNextWindowViewport(vp->ID);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##findsig_dim", nullptr,
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-        IM_COL32(20, 20, 20, 110));
-    ImGui::End();
-    ImGui::PopStyleColor();
-
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
-
-    ImGui::OpenPopup("Find Signature");
-
-    if (!ImGui::BeginPopupModal("Find Signature", &s.showFindSig,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Find Signature", &s.showFindSig, vp, 480, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showFindSig = false;
 
     ImGui::TextUnformatted("Signature");
     ImGui::SetNextItemWidth(-1);
@@ -984,7 +899,7 @@ void drawFindSignatureModal(app::AppState& s)
         }
     }
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 } // namespace ui

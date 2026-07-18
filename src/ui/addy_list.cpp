@@ -285,17 +285,14 @@ void drawAddAddressModal(app::AppState& s)
 {
     if (!s.showAddAddr) return;
 
-    // Center on the main window.
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
 
-    ImGui::OpenPopup("Add Address");
-
-    if (!ImGui::BeginPopupModal("Add Address", &s.showAddAddr,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Add Address", &s.showAddAddr, vp, 360, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showAddAddr = false;
 
     ImGui::TextUnformatted("Address (hex), or module+offset");
     ImGui::SetNextItemWidth(-1);
@@ -401,7 +398,7 @@ void drawAddAddressModal(app::AppState& s)
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         s.showAddAddr = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 void drawClearAddyConfirm(app::AppState& s)
@@ -412,15 +409,13 @@ void drawClearAddyConfirm(app::AppState& s)
     if (s.addyList.empty()) { s.showClearAddy = false; return; }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
 
-    ImGui::OpenPopup("Clear All Addresses");
-
-    if (!ImGui::BeginPopupModal("Clear All Addresses", &s.showClearAddy,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Clear All Addresses", &s.showClearAddy, vp, 340, 0))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showClearAddy = false;
 
     const int n = (int)s.addyList.size();
     ImGui::Text("Remove all %d address%s from the list?", n, n == 1 ? "" : "es");
@@ -439,7 +434,7 @@ void drawClearAddyConfirm(app::AppState& s)
     if (ImGui::Button("Cancel", ImVec2(120, 0)))
         s.showClearAddy = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 } // namespace ui

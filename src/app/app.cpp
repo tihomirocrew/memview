@@ -122,6 +122,64 @@ static void styleColorsDarkCustom()
     c[ImGuiCol_ModalWindowDimBg]          = ImVec4(0, 0, 0, 0.50f);
 }
 
+bool beginBlockingModal(const char* title, bool* p_open,
+                        const ImGuiViewport* vp, float width, float height)
+{
+    // Full-viewport blocker: shades the viewport and swallows any click meant for
+    // the windows behind. NoBringToFrontOnFocus keeps it below the dialog.
+    char blockerId[192];
+    snprintf(blockerId, sizeof(blockerId), "##blocker_%s", title);
+
+    ImGui::SetNextWindowPos(vp->Pos);
+    ImGui::SetNextWindowSize(vp->Size);
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    const ImGuiWindowFlags blockerFlags =
+        ImGuiWindowFlags_NoDecoration    | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoResize        | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoDocking       | ImGuiWindowFlags_NoNavInputs |
+        ImGuiWindowFlags_NoNavFocus      | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::Begin(blockerId, nullptr, blockerFlags);
+
+    ImGui::GetWindowDrawList()->AddRectFilled(
+    vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+    IM_COL32(20, 20, 20, 110));
+
+    ImGuiWindow* blockerWin = ImGui::GetCurrentWindow();
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    // The dialog, centered on the viewport.
+    if (width > 0.f || height > 0.f)
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowViewport(vp->ID);
+    const ImGuiWindowFlags dialogFlags =
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoCollapse;
+    const bool visible = ImGui::Begin(title, p_open, dialogFlags);
+    ImGuiWindow* dialogWin = ImGui::GetCurrentWindow();
+
+    // Raise the pair to the top once, on open. It stays there: the blocker can't
+    // rise, and the windows under it never get focus to jump in front.
+    if (ImGui::IsWindowAppearing())
+    {
+        ImGui::BringWindowToDisplayFront(blockerWin);
+        ImGui::BringWindowToDisplayFront(dialogWin);
+        ImGui::FocusWindow(dialogWin);
+    }
+
+    if (!visible)
+    {
+        ImGui::End();
+        return false;
+    }
+    return true;
+}
+
 void applyTheme(AppState& s, bool dark)
 {
     s.darkTheme = dark;
@@ -230,25 +288,6 @@ void App::drawFrame()
     ui::drawAddyList(state_);
 
     ImGui::End();
-
-    // Dim only the main window behind the modals (the built-in dim is off; see
-    // setupStyle()).
-    if (state_.showProcPicker || state_.showAddAddr || state_.showClearAddy)
-    {
-        ImGui::SetNextWindowPos(vp->Pos);
-        ImGui::SetNextWindowSize(vp->Size);
-        ImGui::SetNextWindowViewport(vp->ID);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-        ImGui::Begin("##dim", nullptr,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-            ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
-            IM_COL32(20, 20, 20, 110));
-        ImGui::End();
-        ImGui::PopStyleColor();
-    }
 
     ui::drawProcessPicker(state_);
     ui::drawAddAddressModal(state_);

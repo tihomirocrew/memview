@@ -18,22 +18,18 @@ void drawProcessPicker(app::AppState& s)
 {
     if (!s.showProcPicker) { s.procNextRefresh = 0.0; s.wasProcPickerOpen = false; return; }
 
-    // Center on the main viewport and pin it there so it isn't detached into
-    // its own OS window.
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowViewport(vp->ID);
 
     const bool justOpened = !s.wasProcPickerOpen;
     s.wasProcPickerOpen = true;
     if (justOpened) s.attachError[0] = '\0';
 
-    ImGui::OpenPopup("Select Process");
-
-    if (!ImGui::BeginPopupModal("Select Process", &s.showProcPicker,
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+    if (!app::beginBlockingModal("Select Process", &s.showProcPicker, vp, 500, 400))
         return;
+
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        s.showProcPicker = false;
 
     // Refresh the process list every second, keeping the selection by PID.
     const double now = ImGui::GetTime();
@@ -104,7 +100,7 @@ void drawProcessPicker(app::AppState& s)
                 if (app::attachToProcess(s, e))
                 {
                     s.showProcPicker = false;
-                    ImGui::EndTable(); ImGui::EndPopup(); return;
+                    ImGui::EndTable(); ImGui::End(); return;
                 }
             }
 
@@ -136,7 +132,7 @@ void drawProcessPicker(app::AppState& s)
     if (ImGui::Button("Cancel", ImVec2(80, 0)))
         s.showProcPicker = false;
 
-    ImGui::EndPopup();
+    ImGui::End();
 }
 
 } // namespace ui
