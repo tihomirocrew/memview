@@ -4,18 +4,19 @@
 #include <cstdint>
 #include <vector>
 
-// Memory View: a separate OS window hosting three dockable panes (Disassembly,
-// Hex View, Memory Regions) that can be dragged apart or torn out. This file
-// owns the container window, the shared Go/Back bar and the modals.
+// Memory View: a separate OS window hosting four dockable panes (Disassembly,
+// Hex View, Memory Regions, Modules) that can be dragged apart or torn out. This
+// file owns the container window, the shared Go/Back bar and the modals.
 namespace ui {
 
 // Entry point, called once per frame.
 void drawMemoryView(app::AppState& s);
 
-// The three panes (each in its own dockable window).
+// The four panes (each in its own dockable window).
 void drawDisasm(app::AppState& s);
 void drawHex(app::AppState& s);
 void drawRegions(app::AppState& s);
+void drawModules(app::AppState& s);
 
 // Modals opened from the Disassembly context menu (all in disasm.cpp).
 void drawAssembleModal(app::AppState& s);      // assemble text -> bytes

@@ -9,8 +9,8 @@
 #include <string>
 
 // The Memory View container: a separate OS window whose dockspace hosts the
-// three panes (Disassembly, Hex View, Memory Regions), which can be dragged
-// apart or torn out. Also owns the shared Go/Back bar driving both panes.
+// four panes (Disassembly, Hex View, Memory Regions, Modules), which can be
+// dragged apart or torn out. Also owns the shared Go/Back bar driving both panes.
 namespace ui {
 
 namespace {
@@ -393,6 +393,7 @@ void drawMemoryView(app::AppState& s)
             ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetContentRegionAvail());
             ImGui::DockBuilderDockWindow("Disassembly", dockId);
             ImGui::DockBuilderDockWindow("Memory Regions", dockId);
+            ImGui::DockBuilderDockWindow("Modules", dockId);
             ImGui::DockBuilderFinish(dockId);
             topId = dockId;
             bottomId = 0;
@@ -411,9 +412,10 @@ void drawMemoryView(app::AppState& s)
         topId = ImGui::DockBuilderSplitNode(
             dockId, ImGuiDir_Up, 0.58f, nullptr, &bottomId);
 
-        // Disassembly + Memory Regions on top, Hex View below.
+        // Disassembly + Memory Regions + Modules on top, Hex View below.
         ImGui::DockBuilderDockWindow("Disassembly", topId);
         ImGui::DockBuilderDockWindow("Memory Regions", topId);
+        ImGui::DockBuilderDockWindow("Modules", topId);
         ImGui::DockBuilderDockWindow("Hex View", bottomId);
         ImGui::DockBuilderFinish(dockId);
     }
@@ -437,6 +439,11 @@ void drawMemoryView(app::AppState& s)
     if (justReopened) ImGui::SetNextWindowDockID(topId, ImGuiCond_Always);
     if (ImGui::Begin("Memory Regions", nullptr, ImGuiWindowFlags_NoResize))
         drawRegions(s);
+    ImGui::End();
+
+    if (justReopened) ImGui::SetNextWindowDockID(topId, ImGuiCond_Always);
+    if (ImGui::Begin("Modules", nullptr, ImGuiWindowFlags_NoResize))
+        drawModules(s);
     ImGui::End();
 
     if (justReopened) ImGui::SetNextWindowDockID(bottomId, ImGuiCond_Always);

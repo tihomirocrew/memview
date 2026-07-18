@@ -85,7 +85,7 @@ void drawRegions(app::AppState& s)
 
             ImGui::TableSetColumnIndex(0);
             char label[24];
-            snprintf(label, sizeof(label), "%016llX",
+            snprintf(label, sizeof(label), "%llX",
                 (unsigned long long)rg.base);
             if (ImGui::Selectable(label, false,
                 ImGuiSelectableFlags_SpanAllColumns |
@@ -145,6 +145,90 @@ void drawRegions(app::AppState& s)
                 ImGui::TextUnformatted(m->name.c_str());
             else
                 ImGui::TextDisabled("-");
+        }
+    }
+
+    ImGui::EndTable();
+}
+
+void drawModules(app::AppState& s)
+{
+    // s.modules is refreshed once per frame in drawMemoryView before the panes
+    // are drawn, so here we only render it.
+
+    // Mouse "back" button undoes the last jump in both panes, matching Regions:
+    // a module jump moves disasm and hex together.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(kMouseButtonBack))
+    {
+        const bool went = goBack(s.disasmHistory, s.disasmAddr);
+        if (goBack(s.hexHistory, s.hexAddr) || went)
+            snprintf(s.memGotoInput, sizeof(s.memGotoInput), "%llX",
+                (unsigned long long)s.disasmAddr);
+    }
+
+    ImGui::Text("%d modules", (int)s.modules.size());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(double-click a row to view it)");
+
+    const ImGuiTableFlags flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+
+    if (!ImGui::BeginTable("##modules", 3, flags))
+        return;
+
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Address");
+    ImGui::TableSetupColumn("Size");
+    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableHeadersRow();
+
+    ImGuiListClipper clipper;
+    clipper.Begin((int)s.modules.size());
+    while (clipper.Step())
+    {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+        {
+            const mem::ModuleEntry& m = s.modules[i];
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            char label[24];
+            snprintf(label, sizeof(label), "%llX",
+                (unsigned long long)m.base);
+            if (ImGui::Selectable(label, false,
+                ImGuiSelectableFlags_SpanAllColumns |
+                ImGuiSelectableFlags_AllowDoubleClick) &&
+                ImGui::IsMouseDoubleClicked(0))
+            {
+                pushHistory(s.disasmHistory, s.disasmAddr);
+                pushHistory(s.hexHistory, s.hexAddr);
+                s.disasmAddr = m.base;
+                s.hexAddr    = m.base;
+                snprintf(s.memGotoInput, sizeof(s.memGotoInput), "%llX",
+                    (unsigned long long)m.base);
+            }
+
+            // Right-click to copy the base address, unpadded.
+            if (ImGui::BeginPopupContextItem())
+            {
+                if (ImGui::MenuItem("Copy Address"))
+                {
+                    char copyBuf[24];
+                    snprintf(copyBuf, sizeof(copyBuf), "%llX",
+                        (unsigned long long)m.base);
+                    ImGui::SetClipboardText(copyBuf);
+                }
+                if (ImGui::MenuItem("Copy Name"))
+                    ImGui::SetClipboardText(m.name.c_str());
+                ImGui::EndPopup();
+            }
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%llX", (unsigned long long)m.size);
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(m.name.c_str());
         }
     }
 
