@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <string>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -14,9 +15,9 @@ namespace app {
 class ScanSession {
 public:
     struct DisplayEntry {
-        uintptr_t address;
-        char      value[32];
-        char      prev[32];
+        uintptr_t   address;
+        std::string value;      // full value, sized to the searched length
+        char        prev[32];
     };
 
     static constexpr size_t kDisplayCap = 2000; // max rows kept for the UI
@@ -42,7 +43,8 @@ public:
     void cancel() { cancel_ = true; }
 
     // Main thread: promote staged results to the display list if a scan finished.
-    void poll();
+    // Needs `proc` to re-read long string values the 8-byte snapshot can't hold.
+    void poll(const mem::Process& proc);
 
     // Block until any running scan finishes (call before teardown).
     void waitIdle();
@@ -50,12 +52,13 @@ public:
     bool   running()       const { return running_; }
     bool   firstScanDone() const { return firstScanDone_; }
     size_t totalFound()    const { return totalFound_; }
+    size_t lastNeedleLen() const { return lastNeedleLen_; }
     bool   capped()        const { return totalFound_ > kDisplayCap; }
 
     const std::vector<DisplayEntry>& results() const { return display_; }
 
 private:
-    void flushDisplay();
+    void flushDisplay(const mem::Process& proc);
 
     std::vector<mem::ScanResult> raw_;       // full result set (main thread)
     std::vector<DisplayEntry>    display_;    // capped view for UI

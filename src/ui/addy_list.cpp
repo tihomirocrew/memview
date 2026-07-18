@@ -4,8 +4,32 @@
 #include <imgui.h>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 namespace ui {
+
+namespace {
+
+// Lets the addy list value hold arbitrarily long strings.
+int inputTextResize(ImGuiInputTextCallbackData* data)
+{
+    if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
+    {
+        auto* str = static_cast<std::string*>(data->UserData);
+        str->resize(data->BufTextLen);
+        data->Buf = str->data();
+    }
+    return 0;
+}
+
+bool inputTextStd(const char* label, std::string& str, ImGuiInputTextFlags flags = 0)
+{
+    flags |= ImGuiInputTextFlags_CallbackResize;
+    return ImGui::InputText(label, str.data(), str.capacity() + 1, flags,
+                            inputTextResize, &str);
+}
+
+} // namespace
 
 void drawAddyList(app::AppState& s)
 {
@@ -139,7 +163,7 @@ void drawAddyList(app::AppState& s)
 
             mem::ValueType vt = app::uiValueType(e.typeIdx);
 
-            const bool committed = ImGui::InputText(id, e.value, sizeof(e.value),
+            const bool committed = inputTextStd(id, e.value,
                 ImGuiInputTextFlags_EnterReturnsTrue);
             const bool editingValue = ImGui::IsItemActive();
             const bool justEdited   = committed || ImGui::IsItemDeactivatedAfterEdit();
@@ -151,7 +175,7 @@ void drawAddyList(app::AppState& s)
             if (justEdited && s.proc.is_open())
             {
                 uint8_t buf[256];
-                if (size_t n = app::parseValue(e.value, vt, buf, sizeof(buf), utf16))
+                if (size_t n = app::parseValue(e.value.c_str(), vt, buf, sizeof(buf), utf16))
                 {
                     bool ok = mem::write_raw(s.proc, e.address, buf, n);
                     e.writeStatus  = ok ? 1 : 2;
@@ -170,7 +194,7 @@ void drawAddyList(app::AppState& s)
                 {
                     // Keep writing the frozen value.
                     uint8_t buf[256];
-                    if (size_t n = app::parseValue(e.value, vt, buf, sizeof(buf), utf16))
+                    if (size_t n = app::parseValue(e.value.c_str(), vt, buf, sizeof(buf), utf16))
                         mem::write_raw(s.proc, e.address, buf, n);
                 }
                 else if (!editingValue && !wroteThisFrame)
@@ -189,7 +213,7 @@ void drawAddyList(app::AppState& s)
                         width = (size_t)len;
                     }
                     if (mem::read_raw(s.proc, e.address, buf, width))
-                        app::formatValue(buf, width, vt, e.value, sizeof(e.value), utf16);
+                        e.value = app::formatValueStr(buf, width, vt, utf16);
                 }
             }
 
@@ -345,9 +369,8 @@ void drawAddAddressModal(app::AppState& s)
         uint8_t buf[256] = {};
         if (mem::read_raw(s.proc, parsedAddr, buf, width))
         {
-            char preview[128];
-            app::formatValue(buf, width, addVt, preview, sizeof(preview), utf16);
-            ImGui::TextUnformatted(preview);
+            std::string preview = app::formatValueStr(buf, width, addVt, utf16);
+            ImGui::TextUnformatted(preview.c_str());
         }
         else
         {
@@ -364,7 +387,7 @@ void drawAddAddressModal(app::AppState& s)
     {
         app::AddyEntry e = {};
         snprintf(e.desc, sizeof(e.desc), "%s", s.addAddrDesc);
-        snprintf(e.value, sizeof(e.value), "0");
+        e.value = "0";
         e.address = parsedAddr;
         e.typeIdx = s.addAddrType;
         e.stringEncoding = s.addAddrStringEncoding;

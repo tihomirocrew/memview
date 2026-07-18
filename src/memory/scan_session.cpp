@@ -6,7 +6,7 @@
 
 namespace app {
 
-void ScanSession::flushDisplay()
+void ScanSession::flushDisplay(const mem::Process& proc)
 {
     totalFound_ = raw_.size();
     display_.clear();
@@ -16,15 +16,32 @@ void ScanSession::flushDisplay()
     {
         DisplayEntry e{};
         e.address = raw_[i].address;
-        // Scalars show their fixed width; String/Pattern show only as many bytes
-        // as the searched needle (capped at the 8-byte snapshot), like CE -- not
-        // the whole snapshot.
-        size_t width = mem::value_size(lastVt_);
-        if (width == 0) width = lastNeedleLen_;
-        if (width > sizeof(raw_[i].snapshot)) width = sizeof(raw_[i].snapshot);
-        formatValue(raw_[i].snapshot, width, lastVt_, e.value, sizeof(e.value), lastUtf16_);
+        // Scalars fit in the snapshot. Strings can be longer than 8 bytes, so
+        // re-read them from memory at the full searched length.
+        const size_t scalarW = mem::value_size(lastVt_);
+        if (scalarW != 0)
+        {
+            e.value = formatValueStr(raw_[i].snapshot, scalarW, lastVt_, lastUtf16_);
+        }
+        else
+        {
+            const size_t width = lastNeedleLen_;
+            std::vector<uint8_t> buf(width ? width : 1);
+            if (proc.is_open() && width &&
+                mem::read_raw(proc, raw_[i].address, buf.data(), width))
+            {
+                e.value = formatValueStr(buf.data(), width, lastVt_, lastUtf16_);
+            }
+            else
+            {
+                // Process gone: fall back to the snapshot's first bytes.
+                const size_t sw = width < sizeof(raw_[i].snapshot)
+                                ? width : sizeof(raw_[i].snapshot);
+                e.value = formatValueStr(raw_[i].snapshot, sw, lastVt_, lastUtf16_);
+            }
+        }
         snprintf(e.prev, sizeof(e.prev), "?");
-        display_.push_back(e);
+        display_.push_back(std::move(e));
     }
 }
 
@@ -117,7 +134,7 @@ void ScanSession::reset()
     firstScanDone_ = false;
 }
 
-void ScanSession::poll()
+void ScanSession::poll(const mem::Process& proc)
 {
     if (!done_) return;
     done_ = false;
@@ -134,7 +151,7 @@ void ScanSession::poll()
 
     std::lock_guard<std::mutex> lk(mutex_);
     raw_ = std::move(staged_);
-    flushDisplay();
+    flushDisplay(proc);
 }
 
 void ScanSession::waitIdle()

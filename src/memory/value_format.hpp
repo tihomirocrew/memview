@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <string>
 #include "memory/memory.hpp"
 
 // UI (combo indices, text input) <-> typed mem:: backend.
@@ -42,5 +43,10 @@ void formatValue(const uint8_t* buf, size_t len, mem::ValueType vt, char* out,
 // 8-byte-snapshot convenience (scan results). For String, `utf16` picks decoding.
 void formatValue(const uint8_t snap[8], mem::ValueType vt, char* out, size_t sz,
                  bool utf16 = false);
+
+// Like formatValue but returns the whole value, no fixed-size buffer. Used for
+// the scan results so a long string isn't clipped to a preview buffer.
+std::string formatValueStr(const uint8_t* buf, size_t len, mem::ValueType vt,
+                           bool utf16 = false);
 
 } // namespace app

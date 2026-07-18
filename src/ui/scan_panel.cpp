@@ -150,7 +150,7 @@ void drawScanResults(app::AppState& s)
                 ImGui::PopID();
 
                 ImGui::TableSetColumnIndex(1);
-                ImGui::Text("%s", r.value);
+                ImGui::Text("%s", r.value.c_str());
                 ImGui::TableSetColumnIndex(2);
                 ImGui::TextDisabled("%s", r.prev);
             }
@@ -225,7 +225,10 @@ void drawScanControls(app::AppState& s)
     ImGui::Spacing();
     ImGui::Text("Value Type");
     ImGui::SetNextItemWidth(-1);
+    
+    ImGui::BeginDisabled(s.scan.firstScanDone());
     ImGui::Combo("##valtype", &s.valueType, app::kValueTypeNames, app::kValueTypeCount);
+    ImGui::EndDisabled();
 
     // String-only options: case folding and encoding.
     if (isString)

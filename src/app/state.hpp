@@ -14,7 +14,7 @@ struct AddyEntry {
     int       typeIdx;        // index into kValueTypeNames
     int       stringEncoding = 0; // 0 = UTF-8, 1 = UTF-16 (used only for String)
     int       length = 8;     // read/display width in bytes, for String & Pattern
-    char      value[128];
+    std::string value;        // current/edited value; grows for long strings
     bool      frozen;
 
     // Feedback for the last manual write attempt (0=none, 1=ok, 2=failed).

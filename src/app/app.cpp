@@ -163,7 +163,7 @@ const DisasmPalette& disasmPalette(const AppState& s)
 
 void App::drawFrame()
 {
-    state_.scan.poll();
+    state_.scan.poll(state_.proc);
 
     // Pin the root window to the main viewport, so the UI stays inside the main
     // OS window rather than spawning its own.
@@ -390,10 +390,17 @@ void addAddyFromResult(AppState& s, int displayIndex)
 
     AddyEntry e = {};
     snprintf(e.desc,  sizeof(e.desc),  "No description");
-    snprintf(e.value, sizeof(e.value), "%s", r.value);
+    e.value = r.value;
     e.address = r.address;
     e.typeIdx = s.valueType;             // inherit the scan's value type
     e.stringEncoding = s.stringEncoding; // ...and encoding, so writes match
+    // Read strings at the needle length, not the default 8.
+    mem::ValueType vt = uiValueType(s.valueType);
+    if (mem::is_bytewise(vt))
+    {
+        size_t nlen = s.scan.lastNeedleLen();
+        if (nlen > 0) e.length = (int)nlen;
+    }
     s.addyList.push_back(e);
 }
 
@@ -532,7 +539,7 @@ void addAddyAddress(AppState& s, uintptr_t address)
 
     AddyEntry e = {};
     snprintf(e.desc,  sizeof(e.desc),  "No description");
-    snprintf(e.value, sizeof(e.value), "0");
+    e.value = "0";
     e.address = address;
     e.typeIdx = 2; // default: 4 Bytes
     s.addyList.push_back(e);

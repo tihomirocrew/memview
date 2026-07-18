@@ -887,7 +887,7 @@ void drawFindSignatureModal(app::AppState& s)
     // stale result can't fire a jump on reopen. Runs before the visibility check.
     if (s.findSigPending && !s.findSigScan.running())
     {
-        s.findSigScan.poll();
+        s.findSigScan.poll(s.proc);
         s.findSigPending = false;
         if (s.showFindSig)
         {
