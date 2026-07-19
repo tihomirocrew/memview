@@ -12,6 +12,13 @@ struct ExportSym {
     uint16_t    ordinal;
 };
 
+// A mapped PE section (".text", ".rdata", ...) as an absolute VA range.
+struct Section {
+    uintptr_t base;    // mod.base + VirtualAddress
+    size_t    size;    // VirtualSize, rounded up to a page
+    char      name[9]; // 8-char section name + NUL
+};
+
 // `target` is the resolved function (same address as its owning DLL's export);
 // `iatSlot` is the pointer cell the loader filled in inside the importing module.
 struct ImportSym {
@@ -70,6 +77,54 @@ inline bool find_data_dir(const Process& proc, uintptr_t modBase, int dirIndex,
 }
 
 } // namespace detail
+
+// Sections of `mod`, in header order (.text, .rdata, ...). Parsed by raw offset
+// like the export/import tables, so it works on a 32-bit (WOW64) target too.
+inline std::vector<Section> read_sections(const Process& proc, const ModuleEntry& mod)
+{
+    std::vector<Section> out;
+
+    uint16_t mz = 0;
+    if (!read_raw(proc, mod.base, &mz, sizeof(mz)) || mz != 0x5A4D) // "MZ"
+        return out;
+
+    int32_t lfanew = 0;
+    if (!read_raw(proc, mod.base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew <= 0)
+        return out;
+
+    const uintptr_t nt = mod.base + (uint32_t)lfanew;
+    uint32_t sig = 0;
+    if (!read_raw(proc, nt, &sig, sizeof(sig)) || sig != 0x00004550) // "PE\0\0"
+        return out;
+
+    // IMAGE_FILE_HEADER (at nt+4): NumberOfSections @ +2, SizeOfOptionalHeader @ +16.
+    uint16_t numSecs = 0, optSize = 0;
+    if (!read_raw(proc, nt + 6,  &numSecs, sizeof(numSecs)) ||
+        !read_raw(proc, nt + 20, &optSize, sizeof(optSize)))
+        return out;
+    if (numSecs == 0 || numSecs > 96) return out; // PE caps sections at 96
+
+    // Section headers follow the optional header: 4 (sig) + 20 (file header).
+    const uintptr_t secTable = nt + 24 + optSize;
+    out.reserve(numSecs);
+    for (uint16_t i = 0; i < numSecs; ++i)
+    {
+        uint8_t hdr[40]; // sizeof(IMAGE_SECTION_HEADER)
+        if (!read_raw(proc, secTable + (uintptr_t)i * 40, hdr, sizeof(hdr))) break;
+
+        Section s{};
+        memcpy(s.name, hdr, 8);
+        s.name[8] = '\0';
+        uint32_t vsize = 0, vaddr = 0;
+        memcpy(&vsize, hdr + 8,  4); // Misc.VirtualSize
+        memcpy(&vaddr, hdr + 12, 4); // VirtualAddress
+        s.base = mod.base + vaddr;
+        // Page-align so a region split by protection still lands inside its section.
+        s.size = (vsize + 0xFFF) & ~(size_t)0xFFF;
+        out.push_back(s);
+    }
+    return out;
+}
 
 // Named exports of `mod`, resolved to absolute addresses. Forwarded exports
 // (which point at a "Dll.Func" redirect string rather than code) are skipped.

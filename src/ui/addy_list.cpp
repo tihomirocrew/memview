@@ -42,6 +42,7 @@ void drawAddyList(app::AppState& s)
         {
             s.modules = mem::list_modules(s.proc);
             s.exportCache.clear();
+            s.sectionCache.clear();
             s.modulesNextRefresh = modNow + 2.0;
         }
     }
@@ -269,6 +270,7 @@ void drawAddyList(app::AppState& s)
         {
             s.modules = mem::list_modules(s.proc);
             s.exportCache.clear();
+            s.sectionCache.clear();
         }
         s.addAddrInput[0] = '\0';
         snprintf(s.addAddrDesc, sizeof(s.addAddrDesc), "No description");

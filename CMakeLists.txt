@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(memview VERSION 0.1.0 LANGUAGES CXX)
+project(memview VERSION 0.1.1 LANGUAGES CXX)
 
 configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h @ONLY)
 

@@ -126,6 +126,10 @@ struct AppState {
     // mutable: filled on demand by the (const) address-expression parser.
     mutable std::unordered_map<std::string, ModuleExports> exportCache;
 
+    // Lazily-parsed PE sections per module, to label regions by section. Keyed
+    // by module base; cleared on refresh.
+    mutable std::unordered_map<uintptr_t, std::vector<mem::Section>> sectionCache;
+
     // Assemble modal (right-click a Disassembly row -> Assemble).
     bool      showAssemble    = false;
     uintptr_t asmAddress      = 0;

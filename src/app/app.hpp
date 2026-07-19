@@ -66,6 +66,11 @@ void addAddyAddress(AppState& s, uintptr_t address);
 // The module `addr` falls inside, or nullptr (heap, stack, private mappings).
 const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr);
 
+// Name of the section of `mod` containing `addr` (".text", ".rdata", ...), or
+// nullptr for addresses before the first section (the PE header region). Parses
+// and caches the module's section headers on first use.
+const char* findSectionName(const AppState& s, const mem::ModuleEntry& mod, uintptr_t addr);
+
 // Label `addr` as "module+offset" inside a loaded module, else raw hex.
 void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n);
 

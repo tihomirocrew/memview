@@ -504,6 +504,18 @@ const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr)
     return nullptr;
 }
 
+const char* findSectionName(const AppState& s, const mem::ModuleEntry& mod, uintptr_t addr)
+{
+    auto it = s.sectionCache.find(mod.base);
+    if (it == s.sectionCache.end())
+        it = s.sectionCache.emplace(mod.base, mem::read_sections(s.proc, mod)).first;
+
+    for (const mem::Section& sec : it->second)
+        if (addr >= sec.base && addr < sec.base + sec.size)
+            return sec.name;
+    return nullptr; // before the first section: the PE header region
+}
+
 void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n)
 {
     if (const mem::ModuleEntry* m = findModule(s, addr))

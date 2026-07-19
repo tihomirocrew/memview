@@ -71,7 +71,7 @@ void drawRegions(app::AppState& s)
     ImGui::TableSetupColumn("Protect");
     ImGui::TableSetupColumn("Type");
     ImGui::TableSetupColumn("State");
-    ImGui::TableSetupColumn("Module");
+    ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableHeadersRow();
 
     ImGuiListClipper clipper;
@@ -140,9 +140,16 @@ void drawRegions(app::AppState& s)
             ImGui::TextUnformatted(rg.state == MEM_COMMIT ? "Commit"
                 : rg.state == MEM_RESERVE ? "Reserve" : "Free");
 
+            // Info: module name on the base (header) row, section name on each
+            // section row below it.
             ImGui::TableSetColumnIndex(5);
-            if (const mem::ModuleEntry* m = app::findModule(s, rg.base))
-                ImGui::TextUnformatted(m->name.c_str());
+            if (const mem::ModuleEntry* mod = app::findModule(s, rg.base))
+            {
+                if (const char* sec = app::findSectionName(s, *mod, rg.base))
+                    ImGui::TextUnformatted(sec);
+                else
+                    ImGui::TextUnformatted(mod->name.c_str());
+            }
             else
                 ImGui::TextDisabled("-");
         }
