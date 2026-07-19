@@ -546,11 +546,79 @@ bool matchModuleAt(const AppState& s, const char* p, uintptr_t& base,
     return false;
 }
 
+// ASCII lower-case copy, for case-insensitive symbol/module keys.
+std::string toLowerStr(std::string s)
+{
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+// A module's name without its final extension: "kernel32.dll" -> "kernel32".
+std::string moduleBaseName(const std::string& name)
+{
+    const size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+// Parse and cache module `m`'s export table on first use; return the cache entry.
+const AppState::ModuleExports& ensureExports(const AppState& s, const mem::ModuleEntry& m)
+{
+    std::string key = toLowerStr(m.name);
+    auto it = s.exportCache.find(key);
+    if (it != s.exportCache.end()) return it->second;
+
+    AppState::ModuleExports me;
+    for (const mem::ExportSym& e : mem::read_exports(s.proc, m))
+    {
+        me.byName.emplace(toLowerStr(e.name), e.addr);
+        me.names.push_back(e.name);
+    }
+    std::sort(me.names.begin(), me.names.end());
+    return s.exportCache.emplace(std::move(key), std::move(me)).first->second;
+}
+
+// Resolve "<module>.<export>" (module with or without its extension, e.g.
+// "kernel32.CreateFileW") to the export's address; `next` gets the token's end.
+bool matchSymbolAt(const AppState& s, const char* p, uintptr_t& addr, const char*& next)
+{
+    for (const mem::ModuleEntry& m : s.modules)
+    {
+        const std::string full = m.name;
+        const std::string base = moduleBaseName(m.name);
+        for (const std::string* mn : { &full, &base })
+        {
+            const size_t len = mn->size();
+            if (len == 0 || _strnicmp(p, mn->c_str(), len) != 0 || p[len] != '.')
+                continue;
+
+            // The export name runs to the next term boundary. Names may hold '.',
+            // '@', '?', '$' (decorated/mangled symbols), so only +/-/space end it.
+            const char* symStart = p + len + 1;
+            const char* symEnd   = symStart;
+            while (!isTermBoundary(*symEnd)) ++symEnd;
+            if (symEnd == symStart) continue; // "module." with no symbol
+
+            const std::string sym = toLowerStr(std::string(symStart, symEnd - symStart));
+            const AppState::ModuleExports& ex = ensureExports(s, m);
+            auto it = ex.byName.find(sym);
+            if (it != ex.byName.end())
+            {
+                addr = it->second;
+                next = symEnd;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 // Evaluates an address expression: a sum/difference of terms, where each term
-// is either a loaded module name (resolved to its base) or a hex number. So
-// "module.dll+1A", "40000+8-4", "module+10+20" and a bare "7FF6..." all parse.
+// is a loaded module name (resolved to its base), a "module.Export" symbol
+// (resolved via the module's PE export table, e.g. "kernel32.CreateFileW"), or a
+// hex number. So "module.dll+1A", "kernel32.CreateFileW+5", "40000+8-4",
+// "module+10+20" and a bare "7FF6..." all parse.
 bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
 {
     const char* p = text;
@@ -583,6 +651,10 @@ bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
         {
             p = next;
         }
+        else if (matchSymbolAt(s, p, term, next))
+        {
+            p = next;
+        }
         else
         {
             // A hex term must begin with a hex digit. This rejects strtoull's
@@ -612,11 +684,18 @@ bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
 
 namespace {
 
-// Modules whose name starts with the term under the cursor (case-insensitive).
-// Reports that term's span in `buf`; returns the match count, capped at maxOut.
-int collectModuleMatches(const AppState& s, const char* buf, int cursor,
-    int& termStart, int& termLen, int* idx, int maxOut)
+// Cap matches per frame: export tables run to thousands, and the user narrows by
+// typing anyway. The dropdown scrolls up to this many.
+constexpr int kMaxSuggest = 50;
+
+// Completions for the term under the cursor, as full replacement tokens:
+//   "module.<partial>" -> that module's exports ("kernel32.CreateFileW")
+//   bare "<partial>"    -> loaded module names
+// Reports the term's span via termStart/termLen.
+int collectSuggestions(const AppState& s, const char* buf, int cursor,
+    int& termStart, int& termLen, std::vector<std::string>& out)
 {
+    out.clear();
     int start = cursor;
     while (start > 0 && !isTermBoundary(buf[start - 1])) --start;
     int end = cursor;
@@ -625,15 +704,47 @@ int collectModuleMatches(const AppState& s, const char* buf, int cursor,
     termLen   = end - start;
     if (termLen <= 0) return 0;
 
-    int n = 0;
-    for (int i = 0; i < (int)s.modules.size() && n < maxOut; ++i)
+    const std::string term(buf + start, (size_t)termLen);
+
+    // "module.<partial>": complete an export name. Match the module by its full or
+    // base name, spelled exactly as typed up to the '.', then filter its exports.
+    if (term.find('.') != std::string::npos)
     {
-        const std::string& name = s.modules[i].name;
-        if ((int)name.size() >= termLen &&
-            _strnicmp(buf + termStart, name.c_str(), (size_t)termLen) == 0)
-            idx[n++] = i;
+        for (const mem::ModuleEntry& m : s.modules)
+        {
+            const std::string spellings[2] = { m.name, moduleBaseName(m.name) };
+            for (const std::string& mn : spellings)
+            {
+                const size_t len = mn.size();
+                if (len == 0 || term.size() <= len ||
+                    _strnicmp(term.c_str(), mn.c_str(), len) != 0 || term[len] != '.')
+                    continue;
+
+                const std::string typedPrefix = term.substr(0, len + 1); // "kernel32."
+                const std::string sympart     = term.substr(len + 1);
+                const AppState::ModuleExports& ex = ensureExports(s, m);
+
+                for (const std::string& name : ex.names)
+                {
+                    if ((int)out.size() >= kMaxSuggest) break;
+                    if (name.size() >= sympart.size() &&
+                        _strnicmp(name.c_str(), sympart.c_str(), sympart.size()) == 0)
+                        out.push_back(typedPrefix + name);
+                }
+                return (int)out.size();
+            }
+        }
     }
-    return n;
+
+    // Otherwise: complete a module name.
+    for (const mem::ModuleEntry& m : s.modules)
+    {
+        if ((int)out.size() >= kMaxSuggest) break;
+        if ((int)m.name.size() >= termLen &&
+            _strnicmp(buf + termStart, m.name.c_str(), (size_t)termLen) == 0)
+            out.push_back(m.name);
+    }
+    return (int)out.size();
 }
 
 // Shared with the InputText callback: Tab reads `highlight`, the callback writes
@@ -654,16 +765,16 @@ int addrAcCallback(ImGuiInputTextCallbackData* data)
     }
     else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion)
     {
-        int ts = 0, tl = 0, idx[12];
-        const int n = collectModuleMatches(*ctx->s, data->Buf, data->CursorPos,
-            ts, tl, idx, 12);
+        int ts = 0, tl = 0;
+        std::vector<std::string> sug;
+        const int n = collectSuggestions(*ctx->s, data->Buf, data->CursorPos,
+            ts, tl, sug);
         if (n > 0)
         {
             int sel = ctx->highlight;
             if (sel < 0 || sel >= n) sel = 0;
-            const std::string& name = ctx->s->modules[idx[sel]].name;
             data->DeleteChars(ts, tl);
-            data->InsertChars(ts, name.c_str());
+            data->InsertChars(ts, sug[sel].c_str());
             ctx->accepted = true;
         }
     }
@@ -694,19 +805,16 @@ bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
     const ImVec2 itemMax = ImGui::GetItemRectMax();
     const ImGuiLastItemData savedItem = ImGui::GetCurrentContext()->LastItemData;
 
-    int termStart = 0, termLen = 0, idx[12];
+    int termStart = 0, termLen = 0;
+    std::vector<std::string> sug;
     int n = 0;
     if (active && ctx.cursor >= 0)
-        n = collectModuleMatches(s, buf, ctx.cursor, termStart, termLen, idx, 12);
+        n = collectSuggestions(s, buf, ctx.cursor, termStart, termLen, sug);
 
-    // Skip a lone suggestion that just echoes a fully-typed name.
-    if (n == 1)
-    {
-        const std::string& only = s.modules[idx[0]].name;
-        if ((int)only.size() == termLen &&
-            _strnicmp(buf + termStart, only.c_str(), (size_t)termLen) == 0)
-            n = 0;
-    }
+    // Skip a lone suggestion that just echoes a fully-typed term.
+    if (n == 1 && (int)sug[0].size() == termLen &&
+        _strnicmp(buf + termStart, sug[0].c_str(), (size_t)termLen) == 0)
+        n = 0;
 
     if (!active || n == 0)
     {
@@ -719,8 +827,9 @@ bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
     int& hl = s.addrAcHighlight;
     if (hl >= n) hl = n - 1;
     if (hl < 0)  hl = 0;
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) hl = (hl + 1) % n;
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))   hl = (hl + n - 1) % n;
+    bool navMoved = false;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) { hl = (hl + 1) % n;     navMoved = true; }
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))   { hl = (hl + n - 1) % n; navMoved = true; }
 
     // Replace the term with `name`, staying within bufSize.
     auto splice = [&](const std::string& name)
@@ -736,31 +845,54 @@ bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
         buf[termStart + nameLen + tailLen] = '\0';
     };
 
+    // Cap the visible rows; the rest scrolls (wheel, scrollbar, or arrow keys).
+    constexpr int kVisibleRows = 10;
+    const ImGuiStyle& acStyle = ImGui::GetStyle();
+    const int   rows   = std::min<int>(n, kVisibleRows);
+    const float rowH   = ImGui::GetTextLineHeightWithSpacing();
+    const float padY   = 2.f; // matches the WindowPadding pushed below
+    const float listH  = rows * rowH + padY * 2.f;
+    const bool  scrolls = n > kVisibleRows;
+
+    // Width to the longest entry (export names outrun the field), but not narrower
+    // than the field, not past the viewport edge, with room for the scrollbar.
+    float contentW = 0.f;
+    for (int i = 0; i < n; ++i)
+        contentW = std::max<float>(contentW, ImGui::CalcTextSize(sug[i].c_str()).x);
+    float acWidth = std::max<float>(itemMax.x - itemMin.x,
+                                    contentW + padY * 2.f + 4.f +
+                                    (scrolls ? acStyle.ScrollbarSize : 0.f));
+    const ImGuiViewport* acVp = ImGui::GetWindowViewport();
+    const float maxRight = acVp->WorkPos.x + acVp->WorkSize.x - itemMin.x;
+    if (maxRight > 0.f) acWidth = std::min<float>(acWidth, maxRight);
+
     // Borderless list under the field, raised over the modal without stealing
     // focus. Screen-space pos + the input's viewport keep it right when torn out.
     ImGui::SetNextWindowViewport(ImGui::GetWindowViewport()->ID);
     ImGui::SetNextWindowPos(ImVec2(itemMin.x, itemMax.y));
-    ImGui::SetNextWindowSize(ImVec2(itemMax.x - itemMin.x, 0.f));
+    ImGui::SetNextWindowSize(ImVec2(acWidth, listH));
     const ImGuiWindowFlags wflags =
         ImGuiWindowFlags_NoTitleBar    | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove        | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoMove        |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoNavInputs   | ImGuiWindowFlags_NoNavFocus |
-        ImGuiWindowFlags_NoDocking     | ImGuiWindowFlags_AlwaysAutoResize;
+        ImGuiWindowFlags_NoDocking;
 
     char winId[64];
     snprintf(winId, sizeof(winId), "##addrac_%08X", (unsigned)itemId);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2, 2));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(2, padY));
     ImGui::Begin(winId, nullptr, wflags);
     ImGuiWindow* acWin = ImGui::GetCurrentWindow();
     for (int i = 0; i < n; ++i)
     {
         ImGui::PushID(i);
-        if (ImGui::Selectable(s.modules[idx[i]].name.c_str(), i == hl))
+        if (ImGui::Selectable(sug[i].c_str(), i == hl))
         {
-            splice(s.modules[idx[i]].name);
+            splice(sug[i]);
             ctx.accepted = true;
         }
+        // Keep the keyboard-highlighted row in view without fighting the wheel.
+        if (i == hl && navMoved) ImGui::SetScrollHereY(0.5f);
         ImGui::PopID();
     }
     ImGui::End();

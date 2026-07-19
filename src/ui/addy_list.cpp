@@ -41,6 +41,7 @@ void drawAddyList(app::AppState& s)
         if (modNow >= s.modulesNextRefresh)
         {
             s.modules = mem::list_modules(s.proc);
+            s.exportCache.clear();
             s.modulesNextRefresh = modNow + 2.0;
         }
     }
@@ -265,7 +266,10 @@ void drawAddyList(app::AppState& s)
         // Open the modal with fresh fields. Refresh modules so
         // "module.exe+offset" resolves even without Memory View open.
         if (s.proc.is_open())
+        {
             s.modules = mem::list_modules(s.proc);
+            s.exportCache.clear();
+        }
         s.addAddrInput[0] = '\0';
         snprintf(s.addAddrDesc, sizeof(s.addAddrDesc), "No description");
         s.addAddrType  = 2; // default to 4 Bytes

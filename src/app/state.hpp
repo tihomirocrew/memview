@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include "memory/memory.hpp"
+#include "memory/pe_symbols.hpp"
 #include "memory/scan_session.hpp"
 
 namespace app {
@@ -114,6 +116,15 @@ struct AppState {
     // Loaded modules, used to label addresses as "module+offset".
     std::vector<mem::ModuleEntry> modules;
     double                        modulesNextRefresh = 0.0;
+
+    // Lazily-parsed PE exports per module, for "module.Symbol" syntax like
+    // kernel32.CreateFileW. Keyed by lower-cased module name; cleared on refresh.
+    struct ModuleExports {
+        std::unordered_map<std::string, uintptr_t> byName; // lower(export) -> addr
+        std::vector<std::string> names;                    // original case, sorted, for autocomplete
+    };
+    // mutable: filled on demand by the (const) address-expression parser.
+    mutable std::unordered_map<std::string, ModuleExports> exportCache;
 
     // Assemble modal (right-click a Disassembly row -> Assemble).
     bool      showAssemble    = false;

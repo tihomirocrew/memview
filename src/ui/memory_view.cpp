@@ -311,6 +311,7 @@ void drawMemoryView(app::AppState& s)
     if (modNow >= s.modulesNextRefresh)
     {
         s.modules = mem::list_modules(s.proc);
+        s.exportCache.clear(); // module bases may have shifted; drop stale symbols
         s.modulesNextRefresh = modNow + 2.0;
     }
 
