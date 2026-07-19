@@ -90,6 +90,37 @@ uint8_t rowKind(const ZydisDecodedInstruction& ins)
     }
 }
 
+// Branch destination for a call/jmp/jcc, for double-click follow. Returns 0 when
+// there's no static target (register-indirect, or an unreadable pointer slot).
+uintptr_t followTarget(const mem::Process& proc, int arch,
+    const ZydisDecodedInstruction& ins, const ZydisDecodedOperand* ops,
+    uintptr_t rip)
+{
+    for (int o = 0; o < ins.operand_count_visible; ++o)
+    {
+        const ZydisDecodedOperand& op = ops[o];
+        ZyanU64 abs = 0;
+        if (op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+        {
+            if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&ins, &op, rip, &abs)))
+                return (uintptr_t)abs;
+        }
+        // RIP-relative memory operand (e.g. IAT thunk `jmp [rip+disp]`): the
+        // effective address is the pointer slot; dereference it for the target.
+        else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                 op.mem.base == ZYDIS_REGISTER_RIP &&
+                 ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&ins, &op, rip, &abs)))
+        {
+            uintptr_t ptr = 0;
+            const size_t psz = arch == 1 ? 4 : 8;
+            if (mem::read_raw(proc, (uintptr_t)abs, &ptr, psz))
+                return ptr;
+            return 0;
+        }
+    }
+    return 0;
+}
+
 // Default PRINT_ADDRESS_ABS handler, captured when the hook is installed.
 // File-scope is fine: the UI is single-threaded.
 ZydisFormatterFunc defaultPrintAddrAbs = nullptr;
@@ -237,6 +268,7 @@ void drawDisasm(app::AppState& s)
     struct Span { uint8_t off, len, type; }; // colored slice of `text` (ZydisTokenType)
     struct Row {
         uintptr_t addr;
+        uintptr_t target;     // branch destination for double-click follow; 0 = none
         uint8_t   len;        // instruction length; 0 = undecodable byte
         uint8_t   kind;       // RowKind, drives the mnemonic accent
         char      label[40];
@@ -264,6 +296,8 @@ void drawDisasm(app::AppState& s)
                 &dec, buf.data() + off, got - off, &ins, ops)))
         {
             d.kind    = rowKind(ins);
+            d.target  = (d.kind == kKindCall || d.kind == kKindJump)
+                ? followTarget(s.proc, s.memViewArch, ins, ops, rip) : 0;
             d.nspans  = 0;
             d.text[0] = '\0';
 
@@ -321,6 +355,7 @@ void drawDisasm(app::AppState& s)
         {
             // Unreadable or undecodable byte: show it and step one.
             d.len      = 0;
+            d.target   = 0;
             d.kind     = kKindNormal;
             d.nspans   = 0;
             d.bytes[0] = '\0';
@@ -354,6 +389,15 @@ void drawDisasm(app::AppState& s)
                     ImVec2(rowW, 0.f)))
                 s.disasmSelAddr = d.addr;
 
+            // Double-click a branch to follow its target.
+            if (d.target && ImGui::IsItemHovered() &&
+                ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            {
+                pushHistory(s.disasmHistory, s.disasmAddr);
+                s.disasmAddr    = d.target;
+                s.disasmSelAddr = d.target;
+            }
+
             ImDrawList* dl = ImGui::GetWindowDrawList();
             dl->AddText(rowPos, colText, d.label);
             dl->AddText(ImVec2(rowPos.x + bytesX, rowPos.y), colDim, d.bytes);
@@ -376,6 +420,12 @@ void drawDisasm(app::AppState& s)
                 // right-click, since an already-open popup blocks item hover.
                 s.disasmSelAddr = d.addr;
 
+                if (ImGui::MenuItem("Follow", "Dbl-click", false, d.target != 0))
+                {
+                    pushHistory(s.disasmHistory, s.disasmAddr);
+                    s.disasmAddr    = d.target;
+                    s.disasmSelAddr = d.target;
+                }
                 if (ImGui::MenuItem("Go to Address", "Ctrl+G"))
                 {
                     s.gotoDisasmInput[0] = '\0';
