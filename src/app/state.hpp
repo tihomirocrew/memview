@@ -29,6 +29,11 @@ struct AppState {
     char         processLabel[256] = "No process selected";
     std::string  procIconPath;      // exe path of the attached process, for the toolbar icon
 
+    // Target exited: the handle is closed, but the addy list and scan results
+    // are kept - those addresses are still worth something on a re-attach.
+    bool         procExited         = false;
+    double       procAliveNextCheck = 0.0; // ImGui::GetTime() of the next liveness check
+
     // Scan inputs (bound to the controls on the right panel).
     char scanValue[4096] = "";  // large enough for long AOB signatures
     char scanValue2[64]  = "";  // upper bound, used only by the "Value between" scan type

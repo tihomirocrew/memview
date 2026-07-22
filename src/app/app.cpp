@@ -222,6 +222,9 @@ const DisasmPalette& disasmPalette(const AppState& s)
 
 void App::drawFrame()
 {
+    // Before scan.poll(): this can close s.proc.
+    pollProcessAlive(state_);
+
     state_.scan.poll(state_.proc);
 
     // Pin the root window to the main viewport, so the UI stays inside the main
@@ -380,10 +383,64 @@ void startNextScan(AppState& s)
         s.stringCaseSensitive, s.stringEncoding == 1, maskPtr);
 }
 
+void onProcessExited(AppState& s)
+{
+    // Before closing the handle: a recycled handle value would send the workers'
+    // reads into some unrelated process.
+    s.scan.waitIdle();
+    s.findSigScan.waitIdle();
+
+    // Memory View has nothing left to show. Its modal flags outlive the window,
+    // so an Assemble box left open would come back over the next process.
+    s.showMemView       = false;
+    s.showAssemble      = false;
+    s.showAsmNopConfirm = false;
+    s.showChangeOpcode  = false;
+    s.showSignature     = false;
+    s.showHexEditValue  = false;
+    s.showGotoDisasm    = false;
+    s.showGotoHex       = false;
+
+    // A hit staged by the dead process would jump the disassembly later.
+    s.findSigScan.reset();
+    s.findSigPending = false;
+    s.showFindSig    = false;
+
+    mem::close(s.proc);
+
+    // Everything read out of the dead address space.
+    s.modules.clear();
+    s.memRegions.clear();
+    s.exportCache.clear();
+    s.sectionCache.clear();
+    s.procIconPath.clear();
+    s.modulesNextRefresh = 0.0;
+    s.regionsNextRefresh = 0.0;
+
+    // Or a re-attach resumes writing to addresses that mean nothing now.
+    for (AddyEntry& e : s.addyList) e.frozen = false;
+
+    s.procExited = true;
+    const size_t len = strlen(s.processLabel);
+    snprintf(s.processLabel + len, sizeof(s.processLabel) - len, " - exited");
+}
+
+void pollProcessAlive(AppState& s)
+{
+    if (!s.proc.is_open()) return;
+
+    const double now = ImGui::GetTime();
+    if (now < s.procAliveNextCheck) return;
+    s.procAliveNextCheck = now + 0.25;
+
+    if (!mem::is_alive(s.proc)) onProcessExited(s);
+}
+
 bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
 {
-    mem::close(s.proc);
-    if (!mem::open(s.proc, entry.pid))
+    // Into a temporary handle, so a failed attach leaves the current one alone.
+    mem::Process next;
+    if (!mem::open(next, entry.pid))
     {
         const DWORD err = GetLastError();
         snprintf(s.attachError, sizeof(s.attachError),
@@ -394,7 +451,12 @@ bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
         return false;
     }
 
-    s.attachError[0] = '\0';
+    mem::close(s.proc);
+    s.proc = next;
+
+    s.attachError[0]     = '\0';
+    s.procExited         = false;
+    s.procAliveNextCheck = 0.0;
     snprintf(s.processLabel, sizeof(s.processLabel),
         "%s  (PID: %lu)", entry.name.c_str(), entry.pid);
     s.procIconPath = entry.path;

@@ -48,6 +48,14 @@ void startNextScan(AppState& s);
 // false on failure, with s.attachError set for the picker to show.
 bool attachToProcess(AppState& s, const mem::ProcessEntry& entry);
 
+// Call once per frame: notices the target exiting and tears the session down.
+// Rate-limited, so it costs a wait syscall a few times a second.
+void pollProcessAlive(AppState& s);
+
+// Stop the scans, close the handle, drop everything read from the dead address
+// space. The addy list and scan results are left alone.
+void onProcessExited(AppState& s);
+
 // Copy a scan result (by display index) into the addy list.
 void addAddyFromResult(AppState& s, int displayIndex);
 

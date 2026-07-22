@@ -25,9 +25,13 @@ void drawToolbar(app::AppState& s)
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
             ImVec2(basePad.x + kIconSize + 4.0f, basePad.y));
 
+    // A dead session shouldn't look like a live one reading zeroes.
+    if (s.procExited)
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.1f, 0.1f, 1.f));
     ImGui::SetNextItemWidth(240);
     ImGui::InputText("##proc", s.processLabel, sizeof(s.processLabel),
         ImGuiInputTextFlags_ReadOnly);
+    if (s.procExited) ImGui::PopStyleColor();
 
     if (icon)
     {

@@ -71,9 +71,11 @@ inline std::vector<ProcessEntry> list_processes()
     return out;
 }
 
+// SYNCHRONIZE is in the default access so is_alive() can wait on the handle.
 inline bool open(Process& proc, DWORD pid,
     DWORD access = PROCESS_VM_READ | PROCESS_VM_WRITE |
-                   PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION)
+                   PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION |
+                   SYNCHRONIZE)
 {
     proc.handle = OpenProcess(access, FALSE, pid);
     if (!proc.is_open()) return false;
@@ -101,7 +103,8 @@ inline bool open(Process& proc, DWORD pid,
 
 inline bool open_by_name(Process& proc, const char* exe_name,
     DWORD access = PROCESS_VM_READ | PROCESS_VM_WRITE |
-                   PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION)
+                   PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION |
+                   SYNCHRONIZE)
 {
     for (auto& e : list_processes())
         if (_stricmp(e.name.c_str(), exe_name) == 0)
@@ -132,6 +135,14 @@ inline bool enable_debug_privilege()
     }
     CloseHandle(token);
     return ok;
+}
+
+// False once the target has exited. is_open() can't tell: the handle stays
+// valid as long as we hold it. A failed wait counts as alive.
+inline bool is_alive(const Process& proc)
+{
+    if (!proc.is_open()) return false;
+    return WaitForSingleObject(proc.handle, 0) != WAIT_OBJECT_0;
 }
 
 inline void close(Process& proc)
