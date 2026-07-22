@@ -405,6 +405,10 @@ void onProcessExited(AppState& s)
     s.findSigScan.reset();
     s.findSigPending = false;
     s.showFindSig    = false;
+    s.findSigHits.clear();
+    s.findSigTotal   = 0;
+    s.findSigLen     = 0;
+    s.findSigSel     = -1;
 
     mem::close(s.proc);
 
@@ -468,6 +472,10 @@ bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
     s.findSigScan.reset();
     s.findSigPending = false;
     s.showFindSig    = false;
+    s.findSigHits.clear();
+    s.findSigTotal   = 0;
+    s.findSigLen     = 0;
+    s.findSigSel     = -1;
 
     // Clear the Memory View position so the next open re-seeds from the new
     // process's main module.
@@ -980,16 +988,20 @@ bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
     return submit;
 }
 
-void addAddyAddress(AppState& s, uintptr_t address)
+void addAddyAddress(AppState& s, uintptr_t address, int typeIdx, int length)
 {
     for (const auto& w : s.addyList)
         if (w.address == address) return;
+
+    if (length < 1)   length = 1;
+    if (length > 256) length = 256; // the list reads at most this much
 
     AddyEntry e = {};
     snprintf(e.desc,  sizeof(e.desc),  "No description");
     e.value = "0";
     e.address = address;
-    e.typeIdx = 2; // default: 4 Bytes
+    e.typeIdx = typeIdx;
+    e.length  = length;
     s.addyList.push_back(e);
 }
 

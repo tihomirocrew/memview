@@ -809,26 +809,31 @@ void drawSignatureModal(app::AppState& s)
 
 void drawFindSignatureModal(app::AppState& s)
 {
-    // Collect a finished scan even if the modal was closed meanwhile, so a
-    // stale result can't fire a jump on reopen. Runs before the visibility check.
+    // Collect a finished scan even if the modal was closed meanwhile, so its
+    // hits can't surface on reopen. Runs before the visibility check.
     if (s.findSigPending && !s.findSigScan.running())
     {
         s.findSigScan.poll(s.proc);
         s.findSigPending = false;
         if (s.showFindSig)
         {
-            if (s.findSigScan.totalFound() > 0)
-            {
-                // Regions are walked in address order, so [0] is the lowest hit.
-                const uintptr_t hit = s.findSigScan.results()[0].address;
-                pushHistory(s.disasmHistory, s.disasmAddr);
-                s.disasmAddr    = hit;
-                s.disasmSelAddr = hit;
-                s.showFindSig   = false;
-            }
-            else
+            const auto& hits = s.findSigScan.results();
+            if (hits.empty())
                 snprintf(s.findSigError, sizeof(s.findSigError),
                     "Pattern not found");
+            else
+            {
+                // Even a lone hit is listed instead of jumped to: a match can
+                // land in the wrong module, and the list is still there on
+                // reopen, saving a second scan of the whole address space.
+                // Regions are walked in address order, so the hits come sorted.
+                s.findSigTotal = s.findSigScan.totalFound();
+                s.findSigHits.clear();
+                s.findSigHits.reserve(hits.size());
+                for (const auto& h : hits)
+                    s.findSigHits.push_back(h.address);
+                s.findSigSel = 0;
+            }
         }
         s.findSigScan.reset(); // one-shot session
     }
@@ -842,6 +847,9 @@ void drawFindSignatureModal(app::AppState& s)
 
     if (!app::beginBlockingModal("Find Signature", &s.showFindSig, vp, 480, 0))
         return;
+
+    // Reopened with a hit list: bring the last pick back into view.
+    const bool appearing = ImGui::IsWindowAppearing();
 
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
         ImGui::IsKeyPressed(ImGuiKey_Escape, false))
@@ -860,18 +868,112 @@ void drawFindSignatureModal(app::AppState& s)
     else if (s.findSigError[0])
         ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f), "%s", s.findSigError);
 
+    // The jump leaves the hit list alone, so reopening the modal offers the
+    // other matches.
+    const auto goToHit = [&s](uintptr_t hit) {
+        pushHistory(s.disasmHistory, s.disasmAddr);
+        s.disasmAddr    = hit;
+        s.disasmSelAddr = hit;
+        s.showFindSig   = false;
+    };
+
+    if (!s.findSigHits.empty())
+    {
+        ImGui::Spacing();
+        if (s.findSigTotal > s.findSigHits.size())
+            ImGui::Text("%zu matches (showing the first %zu)",
+                s.findSigTotal, s.findSigHits.size());
+        else
+            ImGui::Text("%zu match%s", s.findSigTotal,
+                s.findSigTotal == 1 ? "" : "es");
+
+        const ImGuiTableFlags flags =
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+
+        if (ImGui::BeginTable("##findsighits", 2, flags, ImVec2(0, 200)))
+        {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("Address",  ImGuiTableColumnFlags_WidthFixed, 150);
+            ImGui::TableSetupColumn("Location", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            ImGuiListClipper clipper;
+            clipper.Begin((int)s.findSigHits.size());
+            // SetScrollHereY only works on a submitted row, so keep that one.
+            if (appearing)
+                clipper.IncludeItemByIndex(s.findSigSel);
+            while (clipper.Step())
+            {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+                {
+                    const uintptr_t hit = s.findSigHits[i];
+                    char label[64];
+                    app::formatAddrLabel(s, hit, label, sizeof(label));
+
+                    ImGui::TableNextRow();
+                    if (appearing && i == s.findSigSel)
+                        ImGui::SetScrollHereY(0.5f);
+
+                    ImGui::TableSetColumnIndex(0);
+                    char row[40];
+                    snprintf(row, sizeof(row), "%llX##hit%d",
+                        (unsigned long long)hit, i);
+                    if (ImGui::Selectable(row, s.findSigSel == i,
+                            ImGuiSelectableFlags_SpanAllColumns))
+                        s.findSigSel = i;
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                        goToHit(hit);
+
+                    // No str_id: the popup hangs off the row's Selectable id.
+                    if (ImGui::BeginPopupContextItem())
+                    {
+                        if (ImGui::MenuItem("Copy Address"))
+                        {
+                            char copyBuf[24];
+                            snprintf(copyBuf, sizeof(copyBuf), "%llX",
+                                (unsigned long long)hit);
+                            ImGui::SetClipboardText(copyBuf);
+                        }
+                        // Outside a module the label is the address again.
+                        if (ImGui::MenuItem("Copy Location", nullptr, false,
+                                app::findModule(s, hit) != nullptr))
+                            ImGui::SetClipboardText(label);
+                        // Type 7 is Pattern: the entry then shows the matched
+                        // bytes, not an int32 read off code.
+                        if (ImGui::MenuItem("Add to List"))
+                            app::addAddyAddress(s, hit, 7, (int)s.findSigLen);
+                        ImGui::EndPopup();
+                    }
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(label);
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::BeginDisabled(s.findSigPending);
+    ImGui::BeginDisabled(s.findSigPending || s.findSigScan.running());
     doFind |= ImGui::Button("Find", ImVec2(120, 0));
     ImGui::EndDisabled();
+    if (!s.findSigHits.empty())
+    {
+        ImGui::SameLine();
+        if (ImGui::Button("Go", ImVec2(120, 0)))
+            goToHit(s.findSigHits[s.findSigSel]);
+    }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+    if (ImGui::Button("Close", ImVec2(120, 0)))
         s.showFindSig = false;
 
-    if (doFind && !s.findSigPending)
+    // firstScan() quietly does nothing while a worker is still up, which would
+    // leave the modal searching forever.
+    if (doFind && !s.findSigPending && !s.findSigScan.running())
     {
         s.findSigError[0] = '\0';
 
@@ -885,12 +987,25 @@ void drawFindSignatureModal(app::AppState& s)
         {
             // Whole-address-space search on its own session. Both filters are
             // DontCare so the writable-only default doesn't skip code pages.
+            s.findSigHits.clear();
+            s.findSigTotal = 0;
+            s.findSigSel   = -1;
+            s.findSigLen   = n; // the width an "Add to List" entry reads
             s.findSigScan.firstScan(s.proc, mem::ScanType::Exact,
                 mem::ValueType::ArrayOfBytes, needle, n,
                 mem::TriState::DontCare, mem::TriState::DontCare,
                 true, false, mask);
             s.findSigPending = true;
         }
+    }
+
+    // Every way out of the modal lands here. Closed mid-scan, nobody wants the
+    // result, so stop the worker rather than let it walk the rest of the
+    // address space; the next firstScan() drops whatever it staged.
+    if (!s.showFindSig && s.findSigPending)
+    {
+        s.findSigScan.cancel();
+        s.findSigPending = false;
     }
 
     ImGui::End();

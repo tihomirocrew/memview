@@ -69,7 +69,10 @@ void openMemoryView(AppState& s);
 void openMemoryViewAt(AppState& s, uintptr_t address);
 
 // Add an addy-list entry for a raw address (used by the disasm context menu).
-void addAddyAddress(AppState& s, uintptr_t address);
+// `typeIdx` indexes kValueTypeNames; `length` is the read width String and
+// Pattern need, clamped to what the list can read.
+void addAddyAddress(AppState& s, uintptr_t address, int typeIdx = 2,
+                    int length = 8);
 
 // The module `addr` falls inside, or nullptr (heap, stack, private mappings).
 const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr);

@@ -169,14 +169,18 @@ struct AppState {
     bool      sigUnique       = false;
     char      sigOutput[512]  = "";
 
-    // Find-Signature modal: scan the whole address space for a pasted pattern
-    // and jump Disassembly to the first match. Separate from `scan` so the
-    // results panel is left untouched.
+    // Find-Signature modal: scan the whole address space for a pasted pattern,
+    // list the hits and jump Disassembly to the one the user takes. On its own
+    // session so the results panel is left untouched.
     bool        showFindSig       = false;
-    bool        findSigPending    = false; // a find scan is in flight
+    bool        findSigPending    = false; // waiting on a find scan (dropped if abandoned)
     char        findSigInput[512] = "";
     char        findSigError[128] = "";
     ScanSession findSigScan;
+    std::vector<uintptr_t> findSigHits;       // what the last scan found
+    size_t                 findSigTotal = 0;  // matches found, before the display cap
+    size_t                 findSigLen   = 0;  // bytes in the pattern that found them
+    int                    findSigSel   = -1; // selected row in that list
 
     // "Edit Value" modal for the Hex View: a type-aware write at one byte.
     bool      showHexEditValue       = false;
