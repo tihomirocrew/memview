@@ -462,6 +462,11 @@ void drawMemoryView(app::AppState& s)
         ImGui::SetWindowFocus("Disassembly");
     }
 
+    // Bring the Regions pane forward; it clears the flag on the first frame it
+    // gets to draw.
+    if (s.regionsFollow)
+        ImGui::SetWindowFocus("Memory Regions");
+
     drawAssembleModal(s);
     drawAsmNopConfirm(s);
     drawChangeOpcodeModal(s);

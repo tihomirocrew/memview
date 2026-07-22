@@ -117,6 +117,10 @@ struct AppState {
     // Memory Regions panel: committed regions, refreshed periodically.
     std::vector<mem::Region> memRegions;
     double                   regionsNextRefresh = 0.0;
+    // The panel follows the Disassembly address by itself; "Follow in Regions"
+    // just asks it to come forward and scroll there.
+    bool                     regionsFollow      = false;
+    uintptr_t                regionsShownBase   = 0; // region it last scrolled to
 
     // Loaded modules, used to label addresses as "module+offset".
     std::vector<mem::ModuleEntry> modules;

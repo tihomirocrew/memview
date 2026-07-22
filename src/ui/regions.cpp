@@ -54,6 +54,28 @@ void drawRegions(app::AppState& s)
                 (unsigned long long)s.disasmAddr);
     }
 
+    // Highlight the region Disassembly is in, so the map shows where you are
+    // without being asked. A follow from its menu just forces the scroll too.
+    int  curRow      = -1;
+    bool scrollToCur = s.regionsFollow;
+    s.regionsFollow  = false;
+    for (int i = 0; i < (int)s.memRegions.size(); ++i)
+        if (s.disasmAddr >= s.memRegions[i].base &&
+            s.disasmAddr <  s.memRegions[i].base + s.memRegions[i].size)
+        {
+            curRow = i;
+            // Scroll only when the region changes, or the list could never be
+            // scrolled by hand.
+            if (s.memRegions[i].base != s.regionsShownBase)
+            {
+                s.regionsShownBase = s.memRegions[i].base;
+                scrollToCur        = true;
+            }
+            break;
+        }
+    if (curRow < 0)
+        s.regionsShownBase = 0; // forget it, so coming back scrolls again
+
     ImGui::Text("%d committed regions", (int)s.memRegions.size());
     ImGui::SameLine();
     ImGui::TextDisabled("(double-click a row to view it)");
@@ -76,6 +98,9 @@ void drawRegions(app::AppState& s)
 
     ImGuiListClipper clipper;
     clipper.Begin((int)s.memRegions.size());
+    // The clipper skips off-screen rows, so exempt the one we're scrolling to.
+    if (curRow >= 0 && scrollToCur)
+        clipper.IncludeItemByIndex(curRow);
     while (clipper.Step())
     {
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
@@ -87,7 +112,7 @@ void drawRegions(app::AppState& s)
             char label[24];
             snprintf(label, sizeof(label), "%llX",
                 (unsigned long long)rg.base);
-            if (ImGui::Selectable(label, false,
+            if (ImGui::Selectable(label, i == curRow,
                 ImGuiSelectableFlags_SpanAllColumns |
                 ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(0))
@@ -96,9 +121,14 @@ void drawRegions(app::AppState& s)
                 pushHistory(s.hexHistory, s.hexAddr);
                 s.disasmAddr = rg.base;
                 s.hexAddr    = rg.base;
+                // Claim the row now, or the next frame scrolls it out from
+                // under the cursor.
+                s.regionsShownBase = rg.base;
                 snprintf(s.memGotoInput, sizeof(s.memGotoInput), "%llX",
                     (unsigned long long)rg.base);
             }
+            if (i == curRow && scrollToCur)
+                ImGui::SetScrollHereY(0.5f);
 
             // Right-click to copy the base address. The popup binds to the
             // Selectable above, whose per-row label is unique.

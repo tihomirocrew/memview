@@ -412,110 +412,6 @@ void drawDisasm(app::AppState& s)
                     spanColor(pal, d.kind, sp.type, colText, colDim), b, e);
                 x += ImGui::CalcTextSize(b, e).x;
             }
-
-            if (ImGui::BeginPopupContextItem("##disasmctx"))
-            {
-                // Select the row the menu opened on, so the highlight matches
-                // what it (and Ctrl+C) acts on. Done here rather than on the
-                // right-click, since an already-open popup blocks item hover.
-                s.disasmSelAddr = d.addr;
-
-                if (ImGui::MenuItem("Follow", "Dbl-click", false, d.target != 0))
-                {
-                    pushHistory(s.disasmHistory, s.disasmAddr);
-                    s.disasmAddr    = d.target;
-                    s.disasmSelAddr = d.target;
-                }
-                if (ImGui::MenuItem("Go to Address", "Ctrl+G"))
-                {
-                    s.gotoDisasmInput[0] = '\0';
-                    s.showGotoDisasm     = true;
-                }
-                if (ImGui::MenuItem("Back", "Mouse 4", false, !s.disasmHistory.empty()))
-                    goBack(s.disasmHistory, s.disasmAddr);
-
-                if (ImGui::MenuItem("Copy Address", "Ctrl+C"))
-                {
-                    char addr[24];
-                    snprintf(addr, sizeof(addr), "%llX", (unsigned long long)d.addr);
-                    ImGui::SetClipboardText(addr);
-                }
-
-                // Offset from the module base; disabled outside any module.
-                const mem::ModuleEntry* rvaMod = app::findModule(s, d.addr);
-                if (ImGui::MenuItem("Copy RVA", nullptr, false, rvaMod != nullptr))
-                {
-                    char rva[24];
-                    snprintf(rva, sizeof(rva), "%llX",
-                        (unsigned long long)(d.addr - rvaMod->base));
-                    ImGui::SetClipboardText(rva);
-                }
-
-                if (ImGui::MenuItem("Add to List"))
-                    app::addAddyAddress(s, d.addr);
-
-                ImGui::Separator();
-
-                if (ImGui::MenuItem("Find Signature"))
-                {
-                    // Keep the last pattern; just clear the stale error.
-                    s.findSigError[0] = '\0';
-                    s.showFindSig     = true;
-                }
-                if (ImGui::MenuItem("Create Signature"))
-                {
-                    s.sigAddress   = d.addr;
-                    s.showSignature = true;
-                    app::generateSignature(s);
-                }
-
-                ImGui::Separator();
-                // Patching actions sit below the separator, harder to hit by accident.
-                if (ImGui::MenuItem("Assemble"))
-                {
-                    s.asmAddress = d.addr;
-                    // Re-format without the symbol hook; the assembler can't
-                    // parse the "module+offset" symbols in `d.text`.
-                    formatPlainInstr(s, dec, d.addr, s.asmInput,
-                        sizeof(s.asmInput));
-                    s.asmError[0]  = '\0';
-                    s.showAssemble = true;
-                }
-                if (ImGui::MenuItem("Change opcode"))
-                {
-                    s.opcodeAddress = d.addr;
-                    s.opcodeOrigLen = d.len;
-                    // Prefill with the current raw bytes, read fresh (d.bytes is
-                    // truncated at 8 for display).
-                    uint8_t raw[16];
-                    const size_t n = d.len <= sizeof(raw) ? d.len : sizeof(raw);
-                    int op = 0;
-                    if (s.proc.is_open() &&
-                        mem::read_raw(s.proc, d.addr, raw, n))
-                        for (size_t b = 0; b < n; ++b)
-                            op += snprintf(s.opcodeInput + op,
-                                sizeof(s.opcodeInput) - op,
-                                b ? " %02X" : "%02X", raw[b]);
-                    else
-                        s.opcodeInput[0] = '\0';
-                    s.opcodeError[0]   = '\0';
-                    s.showChangeOpcode = true;
-                }
-                if (ImGui::MenuItem("Replace with NOP(s)"))
-                    app::nopFill(s, d.addr, d.len);
-
-                ImGui::Separator();
-                // IDA-style sync: follow Hex View's address. The snap on
-                // toggle-on doesn't push history; Back is for explicit jumps only.
-                if (ImGui::MenuItem("Sync with Hex View", nullptr,
-                        s.syncDisasmToHex))
-                {
-                    s.syncDisasmToHex = !s.syncDisasmToHex;
-                    if (s.syncDisasmToHex)
-                        s.disasmAddr = s.hexAddr;
-                }
-                ImGui::EndPopup();
-            }
         }
         else
         {
@@ -526,66 +422,114 @@ void drawDisasm(app::AppState& s)
                     ImVec2(rowW, 0.f)))
                 s.disasmSelAddr = d.addr;
             ImGui::PopStyleColor();
+        }
 
-            if (ImGui::BeginPopupContextItem("##disasmctx"))
+        // One menu for both row kinds - it binds to whichever Selectable the
+        // row drew. What a ?? row can't do is greyed out, not missing.
+        if (ImGui::BeginPopupContextItem("##disasmctx"))
+        {
+            // Select the row the menu opened on, so the highlight matches
+            // what it (and Ctrl+C) acts on. Done here rather than on the
+            // right-click, since an already-open popup blocks item hover.
+            s.disasmSelAddr = d.addr;
+
+            if (ImGui::MenuItem("Follow", "Dbl-click", false, d.target != 0))
             {
-                // Same as the decodable branch: keep the highlight on this row.
-                s.disasmSelAddr = d.addr;
-
-                if (ImGui::MenuItem("Go to Address", "Ctrl+G"))
-                {
-                    s.gotoDisasmInput[0] = '\0';
-                    s.showGotoDisasm     = true;
-                }
-                if (ImGui::MenuItem("Back", "Mouse 4", false, !s.disasmHistory.empty()))
-                    goBack(s.disasmHistory, s.disasmAddr);
-
-                if (ImGui::MenuItem("Copy Address", "Ctrl+C"))
-                {
-                    char addr[24];
-                    snprintf(addr, sizeof(addr), "%llX", (unsigned long long)d.addr);
-                    ImGui::SetClipboardText(addr);
-                }
-
-                // Offset from the module base; disabled outside any module.
-                const mem::ModuleEntry* rvaMod = app::findModule(s, d.addr);
-                if (ImGui::MenuItem("Copy RVA", nullptr, false, rvaMod != nullptr))
-                {
-                    char rva[24];
-                    snprintf(rva, sizeof(rva), "%llX",
-                        (unsigned long long)(d.addr - rvaMod->base));
-                    ImGui::SetClipboardText(rva);
-                }
-
-                if (ImGui::MenuItem("Add to List"))
-                    app::addAddyAddress(s, d.addr);
-
-                ImGui::Separator();
-
-                if (ImGui::MenuItem("Find Signature"))
-                {
-                    // Keep the last pattern; just clear the stale error.
-                    s.findSigError[0] = '\0';
-                    s.showFindSig     = true;
-                }
-
-                if (ImGui::MenuItem("Create Signature"))
-                {
-                    s.sigAddress   = d.addr;
-                    s.showSignature = true;
-                    app::generateSignature(s);
-                }
-
-                ImGui::Separator();
-                if (ImGui::MenuItem("Sync with Hex View", nullptr,
-                        s.syncDisasmToHex))
-                {
-                    s.syncDisasmToHex = !s.syncDisasmToHex;
-                    if (s.syncDisasmToHex)
-                        s.disasmAddr = s.hexAddr;
-                }
-                ImGui::EndPopup();
+                pushHistory(s.disasmHistory, s.disasmAddr);
+                s.disasmAddr    = d.target;
+                s.disasmSelAddr = d.target;
             }
+            if (ImGui::MenuItem("Follow in Regions"))
+                s.regionsFollow = true;
+            if (ImGui::MenuItem("Go to Address", "Ctrl+G"))
+            {
+                s.gotoDisasmInput[0] = '\0';
+                s.showGotoDisasm     = true;
+            }
+            if (ImGui::MenuItem("Back", "Mouse 4", false, !s.disasmHistory.empty()))
+                goBack(s.disasmHistory, s.disasmAddr);
+
+            if (ImGui::MenuItem("Copy Address", "Ctrl+C"))
+            {
+                char addr[24];
+                snprintf(addr, sizeof(addr), "%llX", (unsigned long long)d.addr);
+                ImGui::SetClipboardText(addr);
+            }
+
+            // Offset from the module base; disabled outside any module.
+            const mem::ModuleEntry* rvaMod = app::findModule(s, d.addr);
+            if (ImGui::MenuItem("Copy RVA", nullptr, false, rvaMod != nullptr))
+            {
+                char rva[24];
+                snprintf(rva, sizeof(rva), "%llX",
+                    (unsigned long long)(d.addr - rvaMod->base));
+                ImGui::SetClipboardText(rva);
+            }
+
+            if (ImGui::MenuItem("Add to List"))
+                app::addAddyAddress(s, d.addr);
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Find Signature"))
+            {
+                // Keep the last pattern; just clear the stale error.
+                s.findSigError[0] = '\0';
+                s.showFindSig     = true;
+            }
+            if (ImGui::MenuItem("Create Signature"))
+            {
+                s.sigAddress   = d.addr;
+                s.showSignature = true;
+                app::generateSignature(s);
+            }
+
+            ImGui::Separator();
+            // Patching actions sit below the separator, harder to hit by accident.
+            if (ImGui::MenuItem("Assemble", nullptr, false, d.len != 0))
+            {
+                s.asmAddress = d.addr;
+                // Re-format without the symbol hook; the assembler can't
+                // parse the "module+offset" symbols in `d.text`.
+                formatPlainInstr(s, dec, d.addr, s.asmInput,
+                    sizeof(s.asmInput));
+                s.asmError[0]  = '\0';
+                s.showAssemble = true;
+            }
+            if (ImGui::MenuItem("Change opcode", nullptr, false, d.len != 0))
+            {
+                s.opcodeAddress = d.addr;
+                s.opcodeOrigLen = d.len;
+                // Prefill with the current raw bytes, read fresh (d.bytes is
+                // truncated at 8 for display).
+                uint8_t raw[16];
+                const size_t n = d.len <= sizeof(raw) ? d.len : sizeof(raw);
+                int op = 0;
+                if (s.proc.is_open() &&
+                    mem::read_raw(s.proc, d.addr, raw, n))
+                    for (size_t b = 0; b < n; ++b)
+                        op += snprintf(s.opcodeInput + op,
+                            sizeof(s.opcodeInput) - op,
+                            b ? " %02X" : "%02X", raw[b]);
+                else
+                    s.opcodeInput[0] = '\0';
+                s.opcodeError[0]   = '\0';
+                s.showChangeOpcode = true;
+            }
+            if (ImGui::MenuItem("Replace with NOP(s)", nullptr, false, d.len != 0))
+                app::nopFill(s, d.addr, d.len);
+
+            ImGui::Separator();
+            // IDA-style sync: follow Hex View's address. The snap on
+            // toggle-on doesn't push history; Back is for explicit jumps only.
+            if (ImGui::MenuItem("Sync with Hex View", nullptr,
+                    s.syncDisasmToHex))
+            {
+                s.syncDisasmToHex = !s.syncDisasmToHex;
+                if (s.syncDisasmToHex)
+                    s.disasmAddr = s.hexAddr;
+            }
+            ImGui::EndPopup();
         }
 
         ImGui::PopID();
