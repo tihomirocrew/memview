@@ -17,32 +17,19 @@
 
 namespace {
 
-// ImGui's multi-viewport backend registers its window class with a solid
-// background brush, so Windows erases each newly exposed strip during an
-// interactive resize before our Present() draws over it, a flicker on every
-// drag step. The backend is a vcpkg dependency we can't edit, so subclass each
-// viewport window as ImGui creates it and swallow WM_ERASEBKGND; our own frame
-// repaints the whole client area anyway. (The main window has no brush, hence
-// no flicker.)
+// Fixes flicker when resizing detached windows: their window class has a
+// background brush, so Windows erases each strip before we redraw it.
 WNDPROC g_origViewportWndProc = nullptr;
 void (*g_origPlatformCreateWindow)(ImGuiViewport*) = nullptr;
 
 LRESULT CALLBACK viewportWndProcNoErase(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    if (msg == WM_ERASEBKGND) return 1; // report handled, skip the erase
+    if (msg == WM_ERASEBKGND) return 1; // claim it's handled so Windows skips the erase
     return CallWindowProcW(g_origViewportWndProc, hwnd, msg, wParam, lParam);
 }
 
-// ImGui creates a new viewport's OS window and shows it on the same frame it
-// first appears; DWM's first composite of that brand-new window can land at the
-// desktop origin before it catches up to the position set moments earlier -- the
-// 0,0 flash seen on every open of the Memory View / Settings windows. Position
-// is never actually wrong (the window's rect is correct the whole time), so this
-// is purely a composition-timing artifact. We DWM-cloak the window as it's
-// created: cloaking hides it from composition while leaving it "visible" to the
-// swapchain (so Present still fills it), and we uncloak it later in the same
-// frame -- once it's been positioned and drawn -- so its first real composite is
-// already in place.
+// Fixes the corner flash when a window opens: DWM composites it once before it
+// picks up the position we set, so we cloak it until it's placed and drawn.
 std::vector<HWND> g_cloaked; // cloaked on create this frame, uncloaked after present
 
 void createViewportWindowNoErase(ImGuiViewport* viewport)
@@ -60,8 +47,8 @@ void createViewportWindowNoErase(ImGuiViewport* viewport)
     }
 }
 
-// Uncloak windows cloaked while created this frame, now that they've been
-// positioned and presented. Call once per frame after RenderPlatformWindowsDefault().
+// Reveals the windows cloaked above. Call once per frame, right after
+// RenderPlatformWindowsDefault(), when they're placed and drawn.
 void uncloakCreatedViewports()
 {
     const BOOL uncloak = FALSE;
@@ -75,7 +62,7 @@ void uncloakCreatedViewports()
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 {
-    // Lets an elevated instance attach to SYSTEM-owned processes; no-op otherwise.
+    // If we're running elevated, this lets us attach to SYSTEM processes too.
     mem::enable_debug_privilege();
 
     app::Window window;
@@ -98,30 +85,29 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;   // dockable Memory View panels
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // allow OS-level child windows
-    // Detached windows keep the native OS title bar.
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;   // Memory View panels can be docked
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // panels can be dragged out into real windows
+    // Keep the normal Windows title bar on dragged-out windows.
     io.ConfigViewportsNoDecoration = false;
     io.IniFilename = nullptr;
 
-    // ProggyClean (ImGui's default) has no Cyrillic glyphs. basis33 is a
-    // Cyrillic-extended fork, embedded and fixed-width, so it also keeps the Hex
-    // and Disassembly panes column-aligned.
+    // ImGui's default font has no Cyrillic; basis33 adds it, and being monospace
+    // it also keeps the Hex and Disassembly panes lined up.
     ImFontConfig fontCfg;
-    fontCfg.FontDataOwnedByAtlas = false; // bytes are constexpr, atlas must not free them
+    fontCfg.FontDataOwnedByAtlas = false; // bytes are constexpr, the atlas must not free them
     io.Fonts->AddFontFromMemoryTTF(
         const_cast<uint8_t*>(fonts::basis33::data.data()),
         static_cast<int>(fonts::basis33::data.size()), 16.0f, &fontCfg,
         io.Fonts->GetGlyphRangesCyrillic());
 
-    // Font Awesome 6, merged onto the same font so icons and text mix in one
-    // ImGui::Text()/Button() call without a separate PushFont().
+    // Font Awesome 6, merged into the same font so icons and text mix in one
+    // ImGui::Text()/Button() call, no PushFont() needed.
     ImFontConfig iconCfg;
-    iconCfg.FontDataOwnedByAtlas = false; // bytes are constexpr, atlas must not free them
+    iconCfg.FontDataOwnedByAtlas = false; // bytes are constexpr, the atlas must not free them
     iconCfg.MergeMode = true;
     iconCfg.PixelSnapH = true;
-    iconCfg.GlyphMinAdvanceX = 16.0f; // keep icons monospace-ish alongside basis33
-    // FA6 sits ~3px above basis33's baseline when merged, so nudge icons down.
+    iconCfg.GlyphMinAdvanceX = 16.0f; // fixed icon width, like basis33
+    // Merged icons sit ~3px too high next to basis33, so push them down.
     iconCfg.GlyphOffset = ImVec2(0.0f, 3.0f);
 
     static constexpr ImWchar kFaSolidRanges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
@@ -137,21 +123,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     ImGui_ImplWin32_Init(window.hwnd());
     ImGui_ImplDX11_Init(d3d.device(), d3d.context());
 
-    // Hook viewport creation to kill the resize flicker (see above).
+    // Hook viewport creation to fix the resize flicker (see above).
     g_origPlatformCreateWindow = ImGui::GetPlatformIO().Platform_CreateWindow;
     ImGui::GetPlatformIO().Platform_CreateWindow = createViewportWindowNoErase;
 
     app::App app;
     app.setupStyle();
 
-    // Also driven by Window's WM_TIMER so the app keeps rendering while a window
-    // is being interactively resized/moved (the outer loop is blocked then).
+    // Window also calls this from its WM_TIMER, so we keep drawing while a window
+    // is being dragged or resized (the loop at the bottom is blocked then).
     bool inRenderFrame = false;
     auto renderFrame = [&]()
     {
-        // Reentrancy guard: some Win32 APIs pump the message queue while they
-        // run, which can dispatch WM_TIMER and re-enter mid-frame; ImGui asserts
-        // on a second NewFrame(). Skip the nested call; the outer frame finishes.
+        // That timer can fire mid-frame and re-enter, since some Win32 calls pump
+        // messages. ImGui asserts on a second NewFrame(), so drop the nested call.
         if (inRenderFrame) return;
         inRenderFrame = true;
 
@@ -162,20 +147,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         app.drawFrame();
 
         ImGui::Render();
-        // Clear to the theme's window background so the slivers around the root
-        // window don't flash a mismatched color.
+        // Clear to the theme background so gaps around the root window don't
+        // flash a different color.
         const ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
         const float clear[4] = { bg.x, bg.y, bg.z, 1.f };
         d3d.bindAndClear(clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        // Render windows that were dragged out into their own OS windows.
+        // Draw the panels that were dragged out into separate windows.
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
             ImGui::UpdatePlatformWindows();
             ImGui::RenderPlatformWindowsDefault();
-            // Reveal windows once they've been positioned + drawn this frame, so
-            // their first composite is already at the right spot (see above).
+            // They're placed and drawn now, so it's safe to show them (see above).
             uncloakCreatedViewports();
         }
 
@@ -185,15 +169,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     };
     window.onRender(renderFrame);
 
-    // The main window has the same first-appearance flash as the detached ones:
-    // DWM can composite it at the desktop origin before it settles at its
-    // centered spot. Cloak it across the initial render + show, then uncloak so
-    // its first real composite is already centered and holding finished UI.
+    // Same corner flash on startup, so keep the main window cloaked until it's
+    // centered and holding a finished frame.
     const BOOL cloakMain = TRUE;
     DwmSetWindowAttribute(window.hwnd(), DWMWA_CLOAK, &cloakMain, sizeof(cloakMain));
 
-    // Render one frame while hidden, then show, so the first thing on screen is
-    // the finished UI rather than an uninitialized backbuffer.
+    // Draw one frame while hidden, so the first thing on screen is the finished
+    // UI and not an empty backbuffer.
     renderFrame();
     window.show();
 
@@ -203,7 +185,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     while (window.pumpMessages())
         renderFrame();
 
-    // Let any in-flight scan finish before tearing down the process handle.
+    // Wait for any running scan to stop before we close the process handle.
     app.state().scan.waitIdle();
     app.state().findSigScan.waitIdle();
 
