@@ -77,6 +77,21 @@ void addAddyAddress(AppState& s, uintptr_t address, int typeIdx = 2,
 // The module `addr` falls inside, or nullptr (heap, stack, private mappings).
 const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr);
 
+// Set an addy entry's address and (re)capture its module anchor: if `addr` falls
+// inside a loaded module the entry anchors to (module, rva) so it survives ASLR
+// on a re-attach; otherwise the anchor is cleared and the address stays absolute.
+void anchorAddyEntry(const AppState& s, AddyEntry& e, uintptr_t addr);
+
+// Re-resolve every anchored addy entry against the current module list: address
+// becomes base + rva. Entries whose module isn't loaded are flagged unresolved
+// (address zeroed so live-sync skips them until the module appears).
+void rebaseAddyList(AppState& s);
+
+// Reload the module list and drop the caches keyed off module bases, then rebase
+// the addy list. The single place module bases get refreshed; call sites keep
+// owning their own refresh timer.
+void refreshModules(AppState& s);
+
 // Name of the section of `mod` containing `addr` (".text", ".rdata", ...), or
 // nullptr for addresses before the first section (the PE header region). Parses
 // and caches the module's section headers on first use.

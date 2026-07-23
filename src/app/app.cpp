@@ -491,6 +491,11 @@ bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
     s.symScanQueue.clear();
     s.modulesNextRefresh = 0.0;
 
+    // Module list is now empty, so anchored entries have no valid base: flag them
+    // unresolved (address zeroed) until the first refresh re-resolves them against
+    // the new process. Absolute entries are left as-is.
+    rebaseAddyList(s);
+
     // Drop any in-flight Find Signature so a stale hit can't jump after re-attach.
     s.findSigScan.reset();
     s.findSigPending = false;
@@ -524,7 +529,7 @@ void addAddyFromResult(AppState& s, int displayIndex)
     AddyEntry e = {};
     snprintf(e.desc,  sizeof(e.desc),  "No description");
     e.value = r.value;
-    e.address = r.address;
+    anchorAddyEntry(s, e, r.address);    // absolute, plus a module anchor if inside one
     e.typeIdx = s.valueType;             // inherit the scan's value type
     e.stringEncoding = s.stringEncoding; // ...and encoding, so writes match
     // Read strings at the needle length, not the default 8.
@@ -595,6 +600,57 @@ const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr)
         if (addr >= m.base && addr < m.base + m.size)
             return &m;
     return nullptr;
+}
+
+void anchorAddyEntry(const AppState& s, AddyEntry& e, uintptr_t addr)
+{
+    e.address          = addr;
+    e.anchorUnresolved = false;
+    if (const mem::ModuleEntry* m = findModule(s, addr))
+    {
+        e.moduleName = m->name;
+        e.rva        = addr - m->base;
+    }
+    else
+    {
+        // Heap/stack/private mapping: no anchor, address stays absolute.
+        e.moduleName.clear();
+        e.rva = 0;
+    }
+}
+
+void rebaseAddyList(AppState& s)
+{
+    for (AddyEntry& e : s.addyList)
+    {
+        if (e.moduleName.empty()) continue; // absolute address, nothing to rebase
+
+        const mem::ModuleEntry* m = nullptr;
+        for (const mem::ModuleEntry& mod : s.modules)
+            if (_stricmp(mod.name.c_str(), e.moduleName.c_str()) == 0) { m = &mod; break; }
+
+        if (m)
+        {
+            e.address          = m->base + e.rva;
+            e.anchorUnresolved = false;
+        }
+        else
+        {
+            // Module not loaded (yet): zero the address so live-sync skips this
+            // row until a later refresh finds the module.
+            e.address          = 0;
+            e.anchorUnresolved = true;
+        }
+    }
+}
+
+void refreshModules(AppState& s)
+{
+    s.modules = mem::list_modules(s.proc);
+    // Module bases may have shifted; drop the caches keyed off them.
+    s.exportCache.clear();
+    s.sectionCache.clear();
+    rebaseAddyList(s);
 }
 
 const char* findSectionName(const AppState& s, const mem::ModuleEntry& mod, uintptr_t addr)
@@ -1341,7 +1397,7 @@ void addAddyAddress(AppState& s, uintptr_t address, int typeIdx, int length)
     AddyEntry e = {};
     snprintf(e.desc,  sizeof(e.desc),  "No description");
     e.value = "0";
-    e.address = address;
+    anchorAddyEntry(s, e, address);      // absolute, plus a module anchor if inside one
     e.typeIdx = typeIdx;
     e.length  = length;
     s.addyList.push_back(e);

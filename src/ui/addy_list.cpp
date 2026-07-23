@@ -40,9 +40,7 @@ void drawAddyList(app::AppState& s)
         const double modNow = ImGui::GetTime();
         if (modNow >= s.modulesNextRefresh)
         {
-            s.modules = mem::list_modules(s.proc);
-            s.exportCache.clear();
-            s.sectionCache.clear();
+            app::refreshModules(s); // also re-resolves anchored entries after ASLR
             s.modulesNextRefresh = modNow + 2.0;
         }
     }
@@ -90,17 +88,30 @@ void drawAddyList(app::AppState& s)
             ImGui::SetNextItemWidth(-1);
             // Sized for a "module.exe+offset" expression, not just a hex address.
             char addrBuf[128];
-            snprintf(addrBuf, sizeof(addrBuf), "%08llX", (unsigned long long)e.address);
+            // Anchored entries show "module+rva" so the location reads the same
+            // across re-attaches (and stays meaningful while unresolved, when the
+            // absolute address is zeroed). Absolute entries show padded hex.
+            if (!e.moduleName.empty())
+                snprintf(addrBuf, sizeof(addrBuf), "%s+%llX",
+                    e.moduleName.c_str(), (unsigned long long)e.rva);
+            else
+                snprintf(addrBuf, sizeof(addrBuf), "%08llX", (unsigned long long)e.address);
             snprintf(id, sizeof(id), "##addr%d", i);
             bool addrDeact = false, addrAccepted = false;
             app::addrInput(s, id, addrBuf, sizeof(addrBuf), 0, &addrDeact, &addrAccepted);
 
-            // Commit on blur or when a suggestion is picked.
+            // Flag an anchored row whose module isn't loaded right now.
+            if (e.anchorUnresolved && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Module \"%s\" not loaded", e.moduleName.c_str());
+
+            // Commit on blur or when a suggestion is picked. Re-anchors: typing a
+            // "module+offset" (or an address inside a module) captures the anchor;
+            // an address outside every module makes the entry absolute.
             if (addrDeact || addrAccepted)
             {
                 uintptr_t parsed = 0;
                 if (app::parseAddrExpr(s, addrBuf, parsed))
-                    e.address = parsed;
+                    app::anchorAddyEntry(s, e, parsed);
                 // Unparseable input is discarded; the field reverts next frame.
             }
 
@@ -125,6 +136,7 @@ void drawAddyList(app::AppState& s)
                         (unsigned long long)(e.address - rvaMod->base));
                     ImGui::SetClipboardText(rva);
                 }
+
                 if (ImGui::MenuItem("Open in Memory View"))
                     app::openMemoryViewAt(s, e.address);
                 ImGui::EndPopup();
@@ -267,11 +279,7 @@ void drawAddyList(app::AppState& s)
         // Open the modal with fresh fields. Refresh modules so
         // "module.exe+offset" resolves even without Memory View open.
         if (s.proc.is_open())
-        {
-            s.modules = mem::list_modules(s.proc);
-            s.exportCache.clear();
-            s.sectionCache.clear();
-        }
+            app::refreshModules(s);
         s.addAddrInput[0] = '\0';
         snprintf(s.addAddrDesc, sizeof(s.addAddrDesc), "No description");
         s.addAddrType  = 2; // default to 4 Bytes
@@ -393,7 +401,7 @@ void drawAddAddressModal(app::AppState& s)
         app::AddyEntry e = {};
         snprintf(e.desc, sizeof(e.desc), "%s", s.addAddrDesc);
         e.value = "0";
-        e.address = parsedAddr;
+        app::anchorAddyEntry(s, e, parsedAddr); // anchor if inside a module
         e.typeIdx = s.addAddrType;
         e.stringEncoding = s.addAddrStringEncoding;
         e.length = s.addAddrLength;

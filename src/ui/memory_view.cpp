@@ -379,10 +379,9 @@ void drawMemoryView(app::AppState& s)
     const double modNow = ImGui::GetTime();
     if (modNow >= s.modulesNextRefresh)
     {
-        s.modules = mem::list_modules(s.proc);
-        // Module bases may have shifted; drop stale symbols and sections.
-        s.exportCache.clear();
-        s.sectionCache.clear();
+        // Module bases may have shifted; this drops the base-keyed caches and
+        // re-resolves anchored addy entries too.
+        app::refreshModules(s);
         s.modulesNextRefresh = modNow + 2.0;
     }
 

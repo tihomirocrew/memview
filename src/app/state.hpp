@@ -20,6 +20,13 @@ struct AddyEntry {
     std::string value;        // current/edited value; grows for long strings
     bool      frozen;
 
+    // Module anchor: survives ASLR across a re-attach. When moduleName is set,
+    // `address` is derived (module base + rva) and re-resolved on every module
+    // refresh; empty means a plain absolute address (heap/stack/private).
+    std::string moduleName;         // e.g. "game.exe"; empty = absolute
+    uintptr_t   rva = 0;            // offset from the module base, when anchored
+    bool        anchorUnresolved = false; // anchored, but the module isn't loaded now
+
     // Feedback for the last manual write attempt (0=none, 1=ok, 2=failed).
     int       writeStatus = 0;
 };
