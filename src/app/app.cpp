@@ -5,6 +5,7 @@
 #include "ui/scan_panel.hpp"
 #include "ui/addy_list.hpp"
 #include "ui/memory_view.hpp"
+#include "ui/struct_dissect.hpp"
 #include "memory/value_format.hpp"
 #include "memory/assembler.hpp"
 #include "memory/signature.hpp"
@@ -312,6 +313,7 @@ void App::drawFrame()
     // Floating windows (outside the root).
     ui::drawSettings(state_);
     ui::drawMemoryView(state_);
+    ui::drawStructDissect(state_);
 
     // TEMP: ImGui demo window for testing.
     //ImGui::ShowDemoWindow();
@@ -512,6 +514,7 @@ bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
     s.disasmHistory.clear();
     s.hexHistory.clear();
     if (s.showMemView) openMemoryView(s);
+    if (s.showStructDissect) openStructDissect(s);
     return true;
 }
 
@@ -592,6 +595,15 @@ void openMemoryViewAt(AppState& s, uintptr_t address)
         (unsigned long long)address);
 
     s.memRegions = mem::query_regions(s.proc);
+}
+
+void openStructDissect(AppState& s)
+{
+    s.showStructDissect = true;
+    if (!s.proc.is_open()) return;
+
+    // So "module.exe+offset" and RTTI work from the first frame.
+    refreshModules(s);
 }
 
 const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr)
@@ -1275,7 +1287,7 @@ int addrAcCallback(ImGuiInputTextCallbackData* data)
 } // namespace
 
 bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
-    int flags, bool* deactivatedAfterEdit, bool* accepted)
+    int flags, bool* deactivatedAfterEdit, bool* accepted, const char* hint)
 {
     const ImGuiID itemId = ImGui::GetID(id);
 
@@ -1285,9 +1297,12 @@ bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
     ctx.accepted  = false;
     ctx.highlight = (s.addrAcOwner == itemId) ? s.addrAcHighlight : 0;
 
-    const bool submit = ImGui::InputText(id, buf, bufSize,
+    const ImGuiInputTextFlags itFlags =
         (ImGuiInputTextFlags)flags | ImGuiInputTextFlags_CallbackAlways |
-        ImGuiInputTextFlags_CallbackCompletion, addrAcCallback, &ctx);
+        ImGuiInputTextFlags_CallbackCompletion;
+    const bool submit = hint
+        ? ImGui::InputTextWithHint(id, hint, buf, bufSize, itFlags, addrAcCallback, &ctx)
+        : ImGui::InputText(id, buf, bufSize, itFlags, addrAcCallback, &ctx);
 
     // Grab the field's state before the dropdown becomes the caller's "last item".
     if (deactivatedAfterEdit) *deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();

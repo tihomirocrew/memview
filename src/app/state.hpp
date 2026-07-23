@@ -6,6 +6,7 @@
 #include "memory/memory.hpp"
 #include "memory/pe_symbols.hpp"
 #include "memory/scan_session.hpp"
+#include "memory/dissect/def.hpp"
 #include "memory/symbol_store.hpp"
 
 namespace app {
@@ -235,6 +236,27 @@ struct AppState {
     // that pane's address changes.
     std::vector<uintptr_t> disasmHistory;
     std::vector<uintptr_t> hexHistory;
+
+    // Structure Dissector: classes on the left, the selected one on the right,
+    // read at a single address.
+    bool                showStructDissect = false;
+    mem::StructRegistry structDefs;
+    int                 structCur        = -1;  // selected class, -1 = none
+    int                 dissectGuessSize = 512; // bytes the guesser reads
+    // The address input, kept in step with the selected class's addressExpr;
+    // dissectAddrClass is the class it currently holds.
+    char                dissectAddr[128] = "";
+    int                 dissectAddrClass = -1;
+    // Class being renamed in the list, or -1.
+    int                 structRenaming     = -1;
+    char                structNameEdit[64] = "";
+    // The value cell being edited, keyed by address so it survives the nesting
+    // without having to track a path through it.
+    uintptr_t           dissectEditAddr    = 0;
+    char                dissectEditBuf[256] = "";
+    // "Generate C++" window.
+    bool                showStructCodegen = false;
+    std::string         structCodeText;
 };
 
 } // namespace app

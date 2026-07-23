@@ -52,6 +52,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/ui/scan_panel.cpp
     src/ui/addy_list.cpp
     src/ui/memory_view.cpp
+    src/ui/struct_dissect.cpp
     src/ui/disasm.cpp
     src/ui/hex_view.cpp
     src/ui/regions.cpp

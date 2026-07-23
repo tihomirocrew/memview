@@ -61,6 +61,15 @@ void drawToolbar(app::AppState& s)
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
+    ImGui::BeginDisabled(!s.proc.is_open());
+    if (ImGui::Button("Structures"))
+    {
+        // Toggle: close if already open.
+        if (s.showStructDissect) s.showStructDissect = false;
+        else                     app::openStructDissect(s);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     if (ImGui::Button("Settings")) s.showSettings = !s.showSettings;
     ImGui::EndChild();
     ImGui::Separator();

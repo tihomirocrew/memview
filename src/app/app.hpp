@@ -70,6 +70,9 @@ void openMemoryView(AppState& s);
 // Open Memory View and jump both panes to `address`.
 void openMemoryViewAt(AppState& s, uintptr_t address);
 
+// Open the Structure Dissector, its own window like Memory View.
+void openStructDissect(AppState& s);
+
 // Add an addy-list entry for a raw address (used by the disasm context menu).
 // `typeIdx` indexes kValueTypeNames; `length` is the read width String and
 // Pattern need, clamped to what the list can read.
@@ -150,7 +153,8 @@ bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out);
 // Optional outs: `deactivatedAfterEdit` mirrors IsItemDeactivatedAfterEdit() for the
 // field; `accepted` is set the frame a suggestion is inserted into `buf`.
 bool addrInput(AppState& s, const char* id, char* buf, size_t bufSize,
-    int flags, bool* deactivatedAfterEdit = nullptr, bool* accepted = nullptr);
+    int flags, bool* deactivatedAfterEdit = nullptr, bool* accepted = nullptr,
+    const char* hint = nullptr);
 
 // Assemble s.asmInput at s.asmAddress and write it into the target. Closes the
 // modal on success; leaves it open with s.asmError on failure.
