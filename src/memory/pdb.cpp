@@ -237,13 +237,14 @@ std::string undecorate(const std::string& name)
     return std::string(buf, n);
 }
 
-std::string lower_copy(std::string s)
+std::string lower_copy(std::string_view sv)
 {
+    std::string s(sv);
     for (char& c : s) c = (char)tolower((unsigned char)c);
     return s;
 }
 
-bool less_nocase(const std::string& a, const std::string& b)
+bool less_nocase(const std::pmr::string& a, const std::pmr::string& b)
 {
     return _stricmp(a.c_str(), b.c_str()) < 0;
 }
@@ -252,7 +253,12 @@ bool less_nocase(const std::string& a, const std::string& b)
 
 bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
 {
-    out = {};
+    // `out` is already bound to its module's arena; reset the contents without
+    // touching the allocator. All symbol strings below are built on this arena.
+    out.byRva.clear();
+    out.byName.clear();
+    out.names.clear();
+    std::pmr::memory_resource* mr = out.byRva.get_allocator().resource();
 
     MappedFile file;
     if (!file.open(req.path))
@@ -312,11 +318,26 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
         return false;
     }
 
+    // Cheap poll of the cancel flag: an atomic load per record would be waste, so
+    // only every few thousand. Enough that a mid-parse cancel is seen in well
+    // under a frame, even on a PDB with hundreds of thousands of publics.
+    auto cancelled = [&req](size_t n) {
+        return (n & 0x1FFF) == 0 && req.cancel &&
+               req.cancel->load(std::memory_order_relaxed);
+    };
+
     // Records are { u16 length; u16 kind; payload }, where length covers the
     // kind and payload but not itself.
     out.byRva.reserve(syms.size() / 48);
-    for (size_t off = 0; off + 4 <= syms.size(); )
+    // Sized up front so the mangled-name inserts below and the second index pass
+    // don't trigger a run of rehashes mid-load - that rehash churn is the worker's
+    // heaviest heap traffic, and it contends with the render thread's allocations.
+    out.byName.reserve(syms.size() / 24);
+    size_t recNo = 0;
+    for (size_t off = 0; off + 4 <= syms.size(); ++recNo)
     {
+        if (cancelled(recNo)) { error = "cancelled"; return false; }
+
         const uint16_t len  = read_u16(syms.data() + off);
         const uint16_t kind = read_u16(syms.data() + off + 2);
         if (len < 2) break;                       // malformed: no forward progress
@@ -351,19 +372,34 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
         if (rawLen == 0) continue;
 
         std::string mangled(raw, rawLen);
-        std::string name = undecorate(mangled);
+        std::string demangled = undecorate(mangled);
 
         // cvpsfFunction (bit 1) separates code from the data publics.
         const bool isFunc = isPub && (word0 & 0x2) != 0;
 
-        out.byRva.push_back({sec.rva + symOff, 0, isFunc, std::move(name)});
-        if (mangled != out.byRva.back().name)
-            out.byName.emplace(lower_copy(std::move(mangled)), sec.rva + symOff);
+        out.byRva.push_back({sec.rva + symOff, 0, isFunc,
+            std::pmr::string(demangled.data(), demangled.size(), mr)});
+        // Index the mangled spelling too, but only when it differs from the
+        // undecorated name (C names and data are already plain).
+        if (mangled != demangled)
+        {
+            const std::string low = lower_copy(mangled);
+            out.byName.emplace(std::pmr::string(low.data(), low.size(), mr),
+                sec.rva + symOff);
+        }
     }
 
     if (out.byRva.empty())
     {
         error = "PDB holds no public symbols";
+        return false;
+    }
+
+    // The sorts and index builds below are the other slow half of a big load;
+    // bail before each so a cancel never waits out more than one of them.
+    if (req.cancel && req.cancel->load(std::memory_order_relaxed))
+    {
+        error = "cancelled";
         return false;
     }
 
@@ -391,11 +427,18 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
         s.size = end > s.rva ? end - s.rva : 0;
     }
 
+    if (req.cancel && req.cancel->load(std::memory_order_relaxed))
+    {
+        error = "cancelled";
+        return false;
+    }
+
     out.names.reserve(out.byRva.size());
     for (const PdbSymbol& s : out.byRva)
     {
-        out.byName.emplace(lower_copy(s.name), s.rva); // first spelling wins
-        out.names.push_back(s.name);
+        const std::string low = lower_copy(s.name); // first spelling wins
+        out.byName.emplace(std::pmr::string(low.data(), low.size(), mr), s.rva);
+        out.names.push_back(s.name); // copied onto the arena (element is pmr)
     }
     std::sort(out.names.begin(), out.names.end(), less_nocase);
     out.names.erase(std::unique(out.names.begin(), out.names.end()), out.names.end());

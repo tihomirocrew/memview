@@ -1,4 +1,6 @@
 #pragma once
+#include <string_view>
+
 #include "app/state.hpp"
 
 struct ImGuiViewport;
@@ -116,12 +118,13 @@ void pumpSymbolScan(const AppState& s);
 // hundreds of characters, and the address column is sized to its longest row.
 constexpr int kAddrLabelMax = 44;
 
-// A resolved symbol. `name` points into the module's symbol table: a PDB symbol
+// A resolved symbol. `name` views into the module's symbol table: a PDB symbol
 // lives until the target exits; an export name lives until the next module
 // refresh drops the export cache. Either way it's valid for the current frame,
-// which is all formatAddrLabel needs.
+// which is all formatAddrLabel needs. (A view, so a PDB pmr::string and an export
+// std::string resolve through one field.)
 struct SymHit {
-    const std::string*      name;
+    std::string_view        name;
     const mem::ModuleEntry* module; // the module it was found in
     uintptr_t               base;   // where the symbol starts
     uintptr_t               disp;   // addr - base

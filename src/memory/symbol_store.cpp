@@ -1,8 +1,29 @@
 #include "memory/symbol_store.hpp"
 
+#define NOMINMAX
+#include <windows.h>
+
 #include <cstring>
+#include <thread>
+#include <utility>
 
 namespace mem {
+namespace {
+
+// Free a whole symbol map off the render thread. Each module's strings live in
+// its own monotonic arena, so destroying a ModuleSymbols is a couple of buffer
+// releases, not a free per symbol - the whole map is a few hundred frees total.
+// That no longer lags the UI, but it's still handed to a detached thread so the
+// caller (onProcessExited, on the render thread) returns immediately. The move
+// into the thread is O(1); the data references nothing outside itself.
+void reapAsync(std::unordered_map<uintptr_t, ModuleSymbolsPtr>&& doomed)
+{
+    std::thread([garbage = std::move(doomed)]() mutable {
+        garbage.clear();
+    }).detach();
+}
+
+} // namespace
 
 SymbolStore::~SymbolStore() { clear(); }
 
@@ -11,6 +32,12 @@ void SymbolStore::ensureWorker()
     if (worker_.joinable()) return;
     stop_ = false;
     worker_ = std::thread(&SymbolStore::workerMain, this);
+
+    // Below-normal so a long parse (a big PDB pins a core) never steals the
+    // scheduler from the render thread - the whole point is that loading symbols
+    // stays invisible. Not BACKGROUND_BEGIN: that also drops memory priority and
+    // would drag the parse itself out badly.
+    SetThreadPriority(worker_.native_handle(), THREAD_PRIORITY_BELOW_NORMAL);
 }
 
 void SymbolStore::request(SymbolJob job, bool force)
@@ -19,14 +46,16 @@ void SymbolStore::request(SymbolJob job, bool force)
     {
         if (inflight_.count(job.modBase)) return;
         auto it = map_.find(job.modBase);
-        if (it != map_.end() && it->second.status != SymStatus::None) return;
+        if (it != map_.end() && it->second->status != SymStatus::None) return;
     }
 
     job.cfg = cfg_;
     if (job.cfg.cacheDir.empty()) job.cfg.cacheDir = default_symbol_cache();
 
     inflight_.insert(job.modBase);
-    map_[job.modBase].status = SymStatus::Queued;
+    ModuleSymbolsPtr& slot = map_[job.modBase];
+    if (!slot) slot = std::make_unique<ModuleSymbols>();
+    slot->status = SymStatus::Queued;
 
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -46,14 +75,15 @@ void SymbolStore::request(SymbolJob job, bool force)
 
 void SymbolStore::setFailed(uintptr_t modBase, std::string note)
 {
-    ModuleSymbols& m = map_[modBase];
-    m.status = SymStatus::Failed;
-    m.note   = std::move(note);
+    ModuleSymbolsPtr& slot = map_[modBase];
+    if (!slot) slot = std::make_unique<ModuleSymbols>();
+    slot->status = SymStatus::Failed;
+    slot->note   = std::move(note);
 }
 
 bool SymbolStore::pump()
 {
-    std::vector<std::pair<uintptr_t, ModuleSymbols>> ready;
+    std::vector<std::pair<uintptr_t, ModuleSymbolsPtr>> ready;
     uintptr_t active = 0;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -72,8 +102,8 @@ bool SymbolStore::pump()
     // set the final status and wins.
     if (active)
         if (auto it = map_.find(active);
-            it != map_.end() && it->second.status == SymStatus::Queued)
-            it->second.status = SymStatus::Loading;
+            it != map_.end() && it->second->status == SymStatus::Queued)
+            it->second->status = SymStatus::Loading;
 
     return !ready.empty();
 }
@@ -81,7 +111,7 @@ bool SymbolStore::pump()
 const ModuleSymbols* SymbolStore::find(uintptr_t modBase) const
 {
     auto it = map_.find(modBase);
-    return it == map_.end() ? nullptr : &it->second;
+    return it == map_.end() ? nullptr : it->second.get();
 }
 
 void SymbolStore::clear()
@@ -100,12 +130,21 @@ void SymbolStore::clear()
         prog_.cancel.store(false);
     }
 
-    std::lock_guard<std::mutex> lk(mu_);
-    done_.clear();
-    active_.clear();
-    activeBase_ = 0;
-    map_.clear();
-    inflight_.clear();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        done_.clear();
+        active_.clear();
+        activeBase_ = 0;
+    }
+    inflight_.clear(); // main-thread only, like map_ below
+
+    // clear() runs from onProcessExited on the render thread. Each module's
+    // symbols sit in their own arena, so freeing them is cheap now - but still do
+    // it on a detached thread so this call returns to the UI at once even after a
+    // "Load All" of ~100 modules. The move into reapAsync is O(1).
+    if (!map_.empty())
+        reapAsync(std::move(map_));
+    map_.clear(); // moved-from map back to a defined empty state
 }
 
 void SymbolStore::cancelPending()
@@ -174,7 +213,7 @@ void SymbolStore::workerMain()
         prog_.received.store(0);
         prog_.total.store(0);
 
-        ModuleSymbols result = runJob(job);
+        ModuleSymbolsPtr result = runJob(job);
 
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -185,16 +224,19 @@ void SymbolStore::workerMain()
     }
 }
 
-ModuleSymbols SymbolStore::runJob(const SymbolJob& job)
+ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
 {
-    ModuleSymbols out;
-    out.status = SymStatus::Failed;
-    out.note   = "no PDB found for this module";
+    auto out = std::make_unique<ModuleSymbols>();
+    out->status = SymStatus::Failed;
+    out->note   = "no PDB found for this module";
 
     PdbLoadRequest req;
     req.sections = job.sections;
     req.age      = job.ref.age;
     req.verify   = job.verify;
+    // Same flag the download loop watches: clear() raises it on process-exit so a
+    // parse in flight bails instead of holding the UI thread on worker_.join().
+    req.cancel   = &prog_.cancel;
     memcpy(req.guid, job.ref.guid, sizeof(req.guid));
 
     std::vector<std::string> candidates;
@@ -208,16 +250,16 @@ ModuleSymbols SymbolStore::runJob(const SymbolJob& job)
     {
         req.path = path;
         std::string err;
-        if (load_pdb(req, out.syms, err))
+        if (load_pdb(req, out->syms, err))
         {
-            out.status  = SymStatus::Loaded;
-            out.pdbPath = path;
-            out.note.clear();
+            out->status  = SymStatus::Loaded;
+            out->pdbPath = path;
+            out->note.clear();
             return out;
         }
         // Keep the last reason: with several candidates, the one that came
         // closest to working is the useful thing to show.
-        out.note = path + ": " + err;
+        out->note = path + ": " + err;
     }
 
     // Nothing local matched. Servers are keyed by GUID, so anything one returns
@@ -235,21 +277,21 @@ ModuleSymbols SymbolStore::runJob(const SymbolJob& job)
         std::string downloaded, err;
         if (!download_pdb(server, job.cfg.cacheDir, job.ref, prog_, downloaded, err))
         {
-            out.note = server + ": " + err;
+            out->note = server + ": " + err;
             continue; // 404 here just means the next store might have it
         }
 
         req.path = downloaded;
-        if (load_pdb(req, out.syms, err))
+        if (load_pdb(req, out->syms, err))
         {
-            out.status  = SymStatus::Loaded;
-            out.pdbPath = downloaded;
-            out.note.clear();
+            out->status  = SymStatus::Loaded;
+            out->pdbPath = downloaded;
+            out->note.clear();
             return out;
         }
         // A server that answers with an unusable file is worth reporting, but
         // shouldn't stop the ones behind it.
-        out.note = server + ": downloaded PDB is unusable: " + err;
+        out->note = server + ": downloaded PDB is unusable: " + err;
     }
     return out;
 }

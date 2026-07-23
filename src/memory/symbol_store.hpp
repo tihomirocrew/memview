@@ -1,6 +1,8 @@
 #pragma once
 #include <condition_variable>
 #include <deque>
+#include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -28,11 +30,22 @@ enum class SymStatus {
 };
 
 struct ModuleSymbols {
+    // The arena backing every string in `syms`. Declared first so it outlives
+    // them (members destruct in reverse order), and monotonic so freeing it is a
+    // handful of buffer releases regardless of how many symbols it holds. Its
+    // non-movable resource makes ModuleSymbols non-movable too - hence the
+    // unique_ptr in the maps below, so only pointers ever move.
+    std::pmr::monotonic_buffer_resource arena;
+
     SymStatus   status = SymStatus::None;
     std::string note;    // where they came from, or why they're missing
     std::string pdbPath; // the file that was actually loaded
-    PdbSymbols  syms;
+    PdbSymbols  syms{&arena};
 };
+
+// Value type of the store's maps: the symbols are non-movable (arena), so they
+// live behind a pointer and only the pointer is ever handed around.
+using ModuleSymbolsPtr = std::unique_ptr<ModuleSymbols>;
 
 struct SymbolSettings {
     bool enabled   = true;  // master switch for PDB symbols
@@ -85,7 +98,7 @@ public:
     // Null until a load for that module has finished. Stays valid until the
     // next pump() that replaces it, or clear().
     const ModuleSymbols* find(uintptr_t modBase) const;
-    const std::unordered_map<uintptr_t, ModuleSymbols>& all() const { return map_; }
+    const std::unordered_map<uintptr_t, ModuleSymbolsPtr>& all() const { return map_; }
 
     // Stop the worker and drop every symbol. Called when the target goes away.
     void clear();
@@ -103,18 +116,18 @@ public:
 private:
     void workerMain();
     void ensureWorker();
-    ModuleSymbols runJob(const SymbolJob& job);
+    ModuleSymbolsPtr runJob(const SymbolJob& job);
 
     // Main thread only.
-    std::unordered_map<uintptr_t, ModuleSymbols> map_;
-    std::unordered_set<uintptr_t>                inflight_;
-    SymbolSettings                               cfg_;
+    std::unordered_map<uintptr_t, ModuleSymbolsPtr> map_;
+    std::unordered_set<uintptr_t>                   inflight_;
+    SymbolSettings                                  cfg_;
 
     // Shared with the worker.
     mutable std::mutex                                    mu_;
     std::condition_variable                               cv_;
     std::deque<SymbolJob>                                 queue_;
-    std::vector<std::pair<uintptr_t, ModuleSymbols>>      done_;
+    std::vector<std::pair<uintptr_t, ModuleSymbolsPtr>>   done_;
     std::string                                           active_;
     uintptr_t                                             activeBase_ = 0;
     std::thread                                           worker_;

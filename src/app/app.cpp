@@ -770,13 +770,19 @@ bool findSymbolAt(const AppState& s, uintptr_t addr, SymHit& out)
         const mem::ModuleSymbols* ms = s.symbols.find(m->base);
         if (!ms)
         {
-            // First address seen in this module: start the load and fall back
-            // to exports until it lands.
-            requestModuleSymbols(s, *m);
+            // First address seen in this module: queue the load for pumpSymbolScan
+            // rather than doing the PE reads here - this runs for every address
+            // label every frame, so a ReadProcessMemory in it hitches the scroll.
+            // Fall back to exports until the load lands. Dedup keeps the queue from
+            // growing while the request is still pending (find() stays null until
+            // the next frame's pumpSymbolScan creates the map entry).
+            std::vector<uintptr_t>& q = s.symScanQueue;
+            if (std::find(q.begin(), q.end(), m->base) == q.end())
+                q.push_back(m->base);
         }
         else if (ms->status == mem::SymStatus::Loaded)
         {
-            const std::vector<mem::PdbSymbol>& v = ms->syms.byRva;
+            const auto&    v   = ms->syms.byRva;
             const uint32_t rva = (uint32_t)(addr - m->base);
 
             auto it = std::upper_bound(v.begin(), v.end(), rva,
@@ -793,7 +799,7 @@ bool findSymbolAt(const AppState& s, uintptr_t addr, SymHit& out)
                 // a 400 KB offset into some function; let exports try instead.
                 if (!(it->size && rva >= it->rva + it->size))
                 {
-                    out.name   = &it->name;
+                    out.name   = it->name;
                     out.module = m;
                     out.base   = m->base + it->rva;
                     out.disp   = rva - it->rva;
@@ -817,7 +823,7 @@ void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n)
 
         // Drop the parameter list - it doesn't fit the address column, and the
         // qualified name alone identifies the symbol.
-        std::string sym = *hit.name;
+        std::string sym(hit.name);
         if (const size_t paren = sym.find('('); paren != std::string::npos)
             sym.resize(paren);
         if ((int)sym.size() > kAddrLabelMax - 8)
@@ -938,7 +944,7 @@ bool nearestExportAt(const AppState& s, const mem::ModuleEntry& m,
         if (nx->addr > it->addr) { rangeEnd = nx->addr; break; }
     if (addr >= rangeEnd) return false;
 
-    out.name   = &it->name;
+    out.name   = it->name;
     out.module = &m;
     out.base   = it->addr;
     out.disp   = addr - it->addr;
@@ -1119,10 +1125,14 @@ constexpr int kMaxSuggest = 50;
 // matches form one contiguous run, so it costs a binary search plus the hits.
 // Names holding a space (undecorated C++ signatures) are skipped - a term ends
 // at whitespace, so they could never be typed back into an expression.
-void collectPrefixMatches(const std::vector<std::string>& sorted,
+// Templated on the name list so it takes both the exports' std::vector<std::string>
+// and the PDB's std::pmr::vector<std::pmr::string> - the elements only need c_str/
+// size/find, which both string types have.
+template <class Names>
+void collectPrefixMatches(const Names& sorted,
     const std::string& prefix, std::vector<std::string>& out)
 {
-    auto lessNoCase = [](const std::string& a, const std::string& b) {
+    auto lessNoCase = [](const auto& a, const auto& b) {
         return _stricmp(a.c_str(), b.c_str()) < 0;
     };
 
@@ -1132,7 +1142,8 @@ void collectPrefixMatches(const std::vector<std::string>& sorted,
         if (it->size() < prefix.size() ||
             _strnicmp(it->c_str(), prefix.c_str(), prefix.size()) != 0)
             break; // past the run
-        if (it->find(' ') == std::string::npos) out.push_back(*it);
+        if (it->find(' ') == std::string_view::npos)
+            out.emplace_back(it->data(), it->size());
     }
 }
 
