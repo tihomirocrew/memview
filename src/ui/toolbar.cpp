@@ -75,7 +75,7 @@ void drawSettings(app::AppState& s)
     // DWM-composition issue handled by cloaking in main.cpp, not by this seed.)
     const ImGuiViewport* mainVp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mainVp->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(360, 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 512), ImGuiCond_FirstUseEver);
     // Always its own OS window: never dockable, never auto-merged into the main
     // window even when it overlaps.
     ImGuiWindowClass alwaysOwnWindow;
@@ -110,6 +110,135 @@ void drawSettings(app::AppState& s)
                     app::applyTheme(s, themeIdx == 1);
                     app::saveConfig(s);
                 }
+
+                ImGui::Spacing();
+                ImGui::SeparatorText("Symbols");
+
+                mem::SymbolSettings& sym = s.symbols.settings();
+
+                if (ImGui::Checkbox("Load PDB symbols", &sym.enabled))
+                    app::saveConfig(s);
+                ImGui::TextDisabled("Names functions, statics and data.");
+
+                ImGui::BeginDisabled(!sym.enabled);
+
+                if (ImGui::Checkbox("Download from the symbol server", &sym.useServer))
+                    app::saveConfig(s);
+                ImGui::TextDisabled("Fetches missing PDBs over the network.");
+
+                ImGui::Spacing();
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("Servers");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+"))
+                {
+                    sym.serverUrls.emplace_back();
+                    app::saveConfig(s);
+                }
+
+                // Height hugs the rows, up to three, then scrolls. Add the
+                // padding, border and inter-row gaps on top of the row heights,
+                // or the last row lands under the edge.
+                const ImGuiStyle& st = ImGui::GetStyle();
+                auto listBoxH = [&st](size_t count) {
+                    const int rows = count < 1 ? 1 : count > 3 ? 3 : (int)count;
+                    return ImGui::GetFrameHeight() * rows +
+                        st.ItemSpacing.y * (rows - 1) +
+                        st.WindowPadding.y * 2 + st.ChildBorderSize * 2;
+                };
+                ImGui::BeginChild("##symservers",
+                    ImVec2(0, listBoxH(sym.serverUrls.size())),
+                    ImGuiChildFlags_Borders);
+                int removeAt = -1;
+                for (size_t i = 0; i < sym.serverUrls.size(); ++i)
+                {
+                    ImGui::PushID((int)i);
+
+                    const float btnW = ImGui::GetFrameHeight();
+                    ImGui::SetNextItemWidth(
+                        ImGui::GetContentRegionAvail().x - btnW -
+                        ImGui::GetStyle().ItemSpacing.x);
+
+                    char urlBuf[256];
+                    snprintf(urlBuf, sizeof(urlBuf), "%s", sym.serverUrls[i].c_str());
+                    if (ImGui::InputTextWithHint("##url", "https://...",
+                            urlBuf, sizeof(urlBuf)))
+                        sym.serverUrls[i] = urlBuf;
+                    if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("x", ImVec2(btnW, btnW))) removeAt = (int)i;
+
+                    ImGui::PopID();
+                }
+                ImGui::EndChild();
+
+                // Deferred, so the list isn't resized mid-iteration.
+                if (removeAt >= 0)
+                {
+                    sym.serverUrls.erase(sym.serverUrls.begin() + removeAt);
+                    app::saveConfig(s);
+                }
+
+                ImGui::Text("Cache directory");
+                ImGui::SetNextItemWidth(-1);
+                char cacheBuf[MAX_PATH];
+                snprintf(cacheBuf, sizeof(cacheBuf), "%s", sym.cacheDir.c_str());
+                if (ImGui::InputTextWithHint("##symcache",
+                        mem::default_symbol_cache().c_str(), cacheBuf, sizeof(cacheBuf)))
+                    sym.cacheDir = cacheBuf;
+                if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Point this at an existing x64dbg or WinDbg cache to\n"
+                        "reuse it - the on-disk layout is the same.");
+
+                ImGui::Spacing();
+                ImGui::AlignTextToFramePadding();
+                ImGui::Text("Extra search directories");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##adddir"))
+                {
+                    sym.extraDirs.emplace_back();
+                    app::saveConfig(s);
+                }
+                ImGui::TextDisabled("Checked for a PDB before the server.");
+
+                // Same box math as the servers list above.
+                ImGui::BeginChild("##symdirs",
+                    ImVec2(0, listBoxH(sym.extraDirs.size())),
+                    ImGuiChildFlags_Borders);
+                int removeDir = -1;
+                for (size_t i = 0; i < sym.extraDirs.size(); ++i)
+                {
+                    ImGui::PushID((int)i);
+
+                    const float btnW = ImGui::GetFrameHeight();
+                    ImGui::SetNextItemWidth(
+                        ImGui::GetContentRegionAvail().x - btnW -
+                        ImGui::GetStyle().ItemSpacing.x);
+
+                    char dirBuf[MAX_PATH];
+                    snprintf(dirBuf, sizeof(dirBuf), "%s", sym.extraDirs[i].c_str());
+                    if (ImGui::InputTextWithHint("##dir", "C:\\symbols",
+                            dirBuf, sizeof(dirBuf)))
+                        sym.extraDirs[i] = dirBuf;
+                    if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+
+                    ImGui::SameLine();
+                    if (ImGui::Button("x", ImVec2(btnW, btnW))) removeDir = (int)i;
+
+                    ImGui::PopID();
+                }
+                ImGui::EndChild();
+
+                if (removeDir >= 0)
+                {
+                    sym.extraDirs.erase(sym.extraDirs.begin() + removeDir);
+                    app::saveConfig(s);
+                }
+
+                ImGui::EndDisabled();
                 ImGui::EndTabItem();
             }
 

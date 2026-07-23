@@ -6,6 +6,7 @@
 #include "memory/memory.hpp"
 #include "memory/pe_symbols.hpp"
 #include "memory/scan_session.hpp"
+#include "memory/symbol_store.hpp"
 
 namespace app {
 
@@ -125,12 +126,17 @@ struct AppState {
     // Loaded modules, used to label addresses as "module+offset".
     std::vector<mem::ModuleEntry> modules;
     double                        modulesNextRefresh = 0.0;
+    char                          moduleFilter[128]  = ""; // name filter in the Modules pane
 
     // Lazily-parsed PE exports per module, for "module.Symbol" syntax like
     // kernel32.CreateFileW. Keyed by lower-cased module name; cleared on refresh.
     struct ModuleExports {
         std::unordered_map<std::string, uintptr_t> byName; // lower(export) -> addr
         std::vector<std::string> names;                    // original case, sorted, for autocomplete
+        // Reverse index for labeling: exports sorted by address, so an address
+        // can be named by the nearest export at or before it.
+        struct ExportAddr { uintptr_t addr; std::string name; };
+        std::vector<ExportAddr> byAddr;
     };
     // mutable: filled on demand by the (const) address-expression parser.
     mutable std::unordered_map<std::string, ModuleExports> exportCache;
@@ -138,6 +144,20 @@ struct AppState {
     // Lazily-parsed PE sections per module, to label regions by section. Keyed
     // by module base; cleared on refresh.
     mutable std::unordered_map<uintptr_t, std::vector<mem::Section>> sectionCache;
+
+    // PDB symbols per module, parsed on a worker thread. mutable for the same
+    // reason as exportCache: the const label/expression paths ask for a module's
+    // symbols the first time an address inside it comes up. Survives the periodic
+    // module refresh (it's keyed by base) and is dropped when the target exits.
+    mutable mem::SymbolStore symbols;
+
+    // Module bases waiting to be scanned for "Load all symbols". Filled by the
+    // button, drained a few per frame by pumpSymbolScan so the PE reads don't
+    // stall one frame. Order doesn't matter.
+    mutable std::vector<uintptr_t> symScanQueue;
+
+    // "Load PDB..." accepts a file whose build GUID doesn't match the module.
+    bool symbolIgnoreMismatch = false;
 
     // Assemble modal (right-click a Disassembly row -> Assemble).
     bool      showAssemble    = false;

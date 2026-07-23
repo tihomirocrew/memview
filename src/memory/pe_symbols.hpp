@@ -19,6 +19,16 @@ struct Section {
     char      name[9]; // 8-char section name + NUL
 };
 
+// Identifies the .pdb a module was built with, from its CodeView debug record.
+// The (name, guid, age) triple is unique per build and is both the symbol-server
+// path and the check that a .pdb found on disk actually belongs to this binary.
+struct PdbRef {
+    std::string name;     // "ntdll.pdb" (basename of origPath)
+    std::string origPath; // path recorded at build time, often not on this machine
+    uint8_t     guid[16] = {};
+    uint32_t    age      = 0;
+};
+
 // `target` is the resolved function (same address as its owning DLL's export);
 // `iatSlot` is the pointer cell the loader filled in inside the importing module.
 struct ImportSym {
@@ -124,6 +134,151 @@ inline std::vector<Section> read_sections(const Process& proc, const ModuleEntry
         out.push_back(s);
     }
     return out;
+}
+
+namespace detail {
+
+// Parse the CodeView PDB reference out of a module's debug directory, given the
+// directory's RVA and size (data-directory entry 6). Reads the whole entry array
+// in one shot, then the one RSDS record it points at - two reads, versus a read
+// per entry and per field. False when there's no CODEVIEW record.
+inline bool read_pdb_ref_from_dir(const Process& proc, const ModuleEntry& mod,
+    uint32_t dirRva, uint32_t dirSize, PdbRef& out)
+{
+    if (dirRva == 0 || dirSize < 28) return false;
+
+    // IMAGE_DEBUG_DIRECTORY is 28 bytes: Characteristics, TimeDateStamp,
+    // MajorVersion, MinorVersion, Type, SizeOfData, AddressOfRawData, PointerToRawData.
+    uint32_t n = dirSize / 28;
+    if (n > 64) n = 64;
+    uint8_t dir[28 * 64];
+    const size_t got = read_tolerant(proc, mod.base + dirRva, dir, (size_t)n * 28);
+    n = (uint32_t)(got / 28);
+
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const uint8_t* e = dir + (size_t)i * 28;
+        uint32_t type, addrRaw;
+        memcpy(&type,    e + 12, 4);
+        if (type != 2) continue; // IMAGE_DEBUG_TYPE_CODEVIEW
+        memcpy(&addrRaw, e + 20, 4); // AddressOfRawData is an RVA once mapped
+
+        // CV_INFO_PDB70 { DWORD 'RSDS'; GUID guid; DWORD age; char pdbName[]; }
+        uint8_t rec[4 + 16 + 4 + 260];
+        const size_t rgot = read_tolerant(proc, mod.base + addrRaw, rec, sizeof(rec));
+        if (rgot < 24) continue;
+        uint32_t sig;
+        memcpy(&sig, rec, 4);
+        if (sig != 0x53445352) continue; // "RSDS"
+        memcpy(out.guid, rec + 4,  16);
+        memcpy(&out.age, rec + 20, 4);
+
+        size_t len = 0;
+        while (24 + len < rgot && rec[24 + len] != '\0') ++len;
+        if (len == 0) continue;
+        out.origPath.assign((const char*)rec + 24, len);
+
+        const size_t slash = out.origPath.find_last_of("\\/");
+        out.name = slash == std::string::npos ? out.origPath
+                                              : out.origPath.substr(slash + 1);
+
+        // This name goes into a cache path and a server URL, and it comes from
+        // the target's own headers - strip path/URL metacharacters so a hostile
+        // module can't smuggle any in. A real PDB name never has them.
+        for (char& c : out.name)
+        {
+            const unsigned char u = (unsigned char)c;
+            if (u < 0x20 || c == '\\' || c == '/' || c == ':' || c == '*' ||
+                c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                c = '_';
+        }
+        return !out.name.empty();
+    }
+    return false;
+}
+
+} // namespace detail
+
+// The .pdb `mod` was built with, from its debug directory. False when the module
+// carries no CodeView record - most Microsoft binaries do, stripped ones don't.
+inline bool read_pdb_ref(const Process& proc, const ModuleEntry& mod, PdbRef& out)
+{
+    uint32_t dirRva = 0, dirSize = 0;
+    bool is64 = false;
+    if (!detail::find_data_dir(proc, mod.base, 6, dirRva, dirSize, is64) || dirRva == 0)
+        return false;
+    return detail::read_pdb_ref_from_dir(proc, mod, dirRva, dirSize, out);
+}
+
+// Reads the section table and the CodeView PDB reference off a module in one go,
+// so a bulk "load all" doesn't cost ~25 tiny reads per module. The PE headers
+// live in the image's first page, so one read covers the sections and the
+// debug-directory slot; the debug records and CodeView record are read after.
+//
+// `sections` is filled when the headers parse; `hasRef`/`outRef` only when a
+// CodeView record is present. False means the PE headers were unreadable.
+inline bool read_symbol_inputs(const Process& proc, const ModuleEntry& mod,
+    std::vector<Section>& sections, PdbRef& outRef, bool& hasRef)
+{
+    hasRef = false;
+    sections.clear();
+
+    uint8_t hdr[0x1000];
+    const size_t got = read_tolerant(proc, mod.base, hdr, sizeof(hdr));
+    if (got < 0x40) return false;
+
+    auto u16 = [&](size_t off) -> uint16_t { uint16_t v; memcpy(&v, hdr + off, 2); return v; };
+    auto u32 = [&](size_t off) -> uint32_t { uint32_t v; memcpy(&v, hdr + off, 4); return v; };
+
+    if (u16(0) != 0x5A4D) return false;                    // "MZ"
+    const int32_t lfanew = (int32_t)u32(0x3C);
+    if (lfanew <= 0 || (size_t)lfanew + 24 > got) return false;
+
+    const size_t nt = (size_t)lfanew;
+    if (u32(nt) != 0x00004550) return false;               // "PE\0\0"
+
+    const uint16_t numSecs = u16(nt + 6);   // IMAGE_FILE_HEADER.NumberOfSections
+    const uint16_t optSize = u16(nt + 20);  // .SizeOfOptionalHeader
+    const uint16_t magic   = u16(nt + 24);  // optional header magic
+    const bool     is64    = (magic == 0x20B);
+    const uint32_t ddOff   = is64 ? 112 : 96;
+
+    // Section table: right after the optional header. Parsed from the buffer when
+    // it fits (it does for all but pathological section counts); otherwise fall
+    // back to the per-section reader.
+    const size_t secTable = nt + 24 + optSize;
+    if (numSecs && numSecs <= 96 && secTable + (size_t)numSecs * 40 <= got)
+    {
+        sections.reserve(numSecs);
+        for (uint16_t i = 0; i < numSecs; ++i)
+        {
+            const uint8_t* h = hdr + secTable + (size_t)i * 40;
+            Section s{};
+            memcpy(s.name, h, 8);
+            s.name[8] = '\0';
+            uint32_t vsize = 0, vaddr = 0;
+            memcpy(&vsize, h + 8,  4); // Misc.VirtualSize
+            memcpy(&vaddr, h + 12, 4); // VirtualAddress
+            s.base = mod.base + vaddr;
+            s.size = (vsize + 0xFFF) & ~(size_t)0xFFF;
+            sections.push_back(s);
+        }
+    }
+    else
+    {
+        sections = read_sections(proc, mod);
+    }
+
+    // Debug directory = data-directory entry 6. Its slot sits in the buffer; the
+    // records it points at generally don't, so read_pdb_ref_from_dir fetches them.
+    const size_t ddSlot = nt + 24 + ddOff + 6 * 8;
+    if (ddSlot + 8 <= got)
+    {
+        const uint32_t dbgRva  = u32(ddSlot);
+        const uint32_t dbgSize = u32(ddSlot + 4);
+        hasRef = detail::read_pdb_ref_from_dir(proc, mod, dbgRva, dbgSize, outRef);
+    }
+    return true;
 }
 
 // Named exports of `mod`, resolved to absolute addresses. Forwarded exports

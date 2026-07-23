@@ -82,7 +82,44 @@ const mem::ModuleEntry* findModule(const AppState& s, uintptr_t addr);
 // and caches the module's section headers on first use.
 const char* findSectionName(const AppState& s, const mem::ModuleEntry& mod, uintptr_t addr);
 
-// Label `addr` as "module+offset" inside a loaded module, else raw hex.
+// Queue a PDB load for `m`. Reads the module's CodeView record and section table
+// here, on the thread that owns the process handle, then hands plain data to the
+// worker. `forcedPath` skips the usual search order (the "Load PDB..." action);
+// `verify` off accepts a PDB whose build GUID doesn't match.
+void requestModuleSymbols(const AppState& s, const mem::ModuleEntry& m,
+    bool force = false, const char* forcedPath = nullptr, bool verify = true);
+
+// Queue every loaded module that hasn't been tried yet. Cheap: it only records
+// the module bases; pumpSymbolScan does the per-module PE reads a few per frame.
+void requestAllModuleSymbols(const AppState& s);
+
+// Drain a bounded slice of the "load all" scan queue, reading each module's PE
+// headers and queueing its PDB load. Call once per frame.
+void pumpSymbolScan(const AppState& s);
+
+// Widest label formatAddrLabel will emit. An undecorated C++ name runs to
+// hundreds of characters, and the address column is sized to its longest row.
+constexpr int kAddrLabelMax = 44;
+
+// A resolved symbol. `name` points into the module's symbol table: a PDB symbol
+// lives until the target exits; an export name lives until the next module
+// refresh drops the export cache. Either way it's valid for the current frame,
+// which is all formatAddrLabel needs.
+struct SymHit {
+    const std::string*      name;
+    const mem::ModuleEntry* module; // the module it was found in
+    uintptr_t               base;   // where the symbol starts
+    uintptr_t               disp;   // addr - base
+};
+
+// Nearest PDB symbol at or before `addr`, inside the module holding it. Queues
+// that module's symbols the first time it's asked, so simply rendering an
+// address is enough to pull them in.
+bool findSymbolAt(const AppState& s, uintptr_t addr, SymHit& out);
+
+// Label `addr` as "module.Symbol+offset" when symbols are loaded, else
+// "module+offset" inside a loaded module, else raw hex. Long C++ names lose
+// their parameter list and are clipped to kAddrLabelMax.
 void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n);
 
 // Parse a "Go to"/"Add Address" expression: plain hex, a module name (its base),

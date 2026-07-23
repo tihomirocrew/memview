@@ -45,7 +45,28 @@ void loadConfig(AppState& s)
     if (j.is_discarded())
         return;
 
-    s.darkTheme = j.value("darkTheme", s.darkTheme);
+    // is_discarded() only catches syntax errors; a wrong-typed value makes
+    // value()/get<>() throw. Treat that like a corrupt file and keep the
+    // defaults rather than crashing at startup.
+    try
+    {
+        s.darkTheme = j.value("darkTheme", s.darkTheme);
+
+        mem::SymbolSettings& sym = s.symbols.settings();
+        sym.enabled   = j.value("symbolsEnabled", sym.enabled);
+        sym.useServer = j.value("symbolServer",   sym.useServer);
+        sym.cacheDir  = j.value("symbolCacheDir", sym.cacheDir);
+        if (j.contains("symbolServers") && j["symbolServers"].is_array())
+            sym.serverUrls = j["symbolServers"].get<std::vector<std::string>>();
+        else if (j.contains("symbolServerUrl")) // single-server config, before the list
+            sym.serverUrls = { j["symbolServerUrl"].get<std::string>() };
+        if (j.contains("symbolSearchDirs") && j["symbolSearchDirs"].is_array())
+            sym.extraDirs = j["symbolSearchDirs"].get<std::vector<std::string>>();
+    }
+    catch (const nlohmann::json::exception&)
+    {
+        // A field was the wrong type; the ones read before it still applied.
+    }
 }
 
 void saveConfig(const AppState& s)
@@ -54,8 +75,14 @@ void saveConfig(const AppState& s)
     if (!configPath(path, sizeof(path), true))
         return;
 
+    const mem::SymbolSettings& sym = s.symbols.settings();
     const nlohmann::json j = {
-        { "darkTheme", s.darkTheme },
+        { "darkTheme",        s.darkTheme },
+        { "symbolsEnabled",   sym.enabled },
+        { "symbolServer",     sym.useServer },
+        { "symbolServers",    sym.serverUrls },
+        { "symbolCacheDir",   sym.cacheDir },
+        { "symbolSearchDirs", sym.extraDirs },
     };
 
     std::ofstream f(path);

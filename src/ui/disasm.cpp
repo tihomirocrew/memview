@@ -125,26 +125,30 @@ uintptr_t followTarget(const mem::Process& proc, int arch,
 // File-scope is fine: the UI is single-threaded.
 ZydisFormatterFunc defaultPrintAddrAbs = nullptr;
 
-// Formatter hook: absolute addresses inside a loaded module print as
-// "module+offset" via a SYMBOL token (so they pick up the symbol color). Covers
-// call/jmp targets and RIP-relative operands, e.g. "[user32.dll+1A2B]".
+// Formatter hook: absolute addresses inside a loaded module print as a symbol
+// ("ntdll.NtCreateFile+11") or "module+offset" via a SYMBOL token, so they pick
+// up the symbol color. Covers call/jmp targets and RIP-relative operands, e.g.
+// "[user32.dll+1A2B]". Addresses outside every module fall through to the
+// default handler, which prints them as a plain value.
 ZyanStatus printAddrAbs(const ZydisFormatter* formatter,
     ZydisFormatterBuffer* buffer, ZydisFormatterContext* context)
 {
     const auto* s = static_cast<const app::AppState*>(context->user_data);
     ZyanU64 address = 0;
     if (s && ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(context->instruction,
-            context->operand, context->runtime_address, &address)))
-        if (const mem::ModuleEntry* m = app::findModule(*s, (uintptr_t)address))
-        {
-            ZYAN_CHECK(ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL));
-            ZyanString* str;
-            ZYAN_CHECK(ZydisFormatterBufferGetString(buffer, &str));
-            const unsigned long long off = address - m->base;
-            return off
-                ? ZyanStringAppendFormat(str, "%s+%llX", m->name.c_str(), off)
-                : ZyanStringAppendFormat(str, "%s", m->name.c_str());
-        }
+            context->operand, context->runtime_address, &address)) &&
+        app::findModule(*s, (uintptr_t)address))
+    {
+        // Same label the address column shows, so an operand and the line it
+        // points at read identically.
+        char label[app::kAddrLabelMax + 24];
+        app::formatAddrLabel(*s, (uintptr_t)address, label, sizeof(label));
+
+        ZYAN_CHECK(ZydisFormatterBufferAppend(buffer, ZYDIS_TOKEN_SYMBOL));
+        ZyanString* str;
+        ZYAN_CHECK(ZydisFormatterBufferGetString(buffer, &str));
+        return ZyanStringAppendFormat(str, "%s", label);
+    }
     return defaultPrintAddrAbs(formatter, buffer, context);
 }
 
@@ -271,7 +275,7 @@ void drawDisasm(app::AppState& s)
         uintptr_t target;     // branch destination for double-click follow; 0 = none
         uint8_t   len;        // instruction length; 0 = undecodable byte
         uint8_t   kind;       // RowKind, drives the mnemonic accent
-        char      label[40];
+        char      label[app::kAddrLabelMax + 24]; // symbol + "+offset"
         char      bytes[32];
         char      text[192];
         Span      spans[24];
@@ -441,6 +445,14 @@ void drawDisasm(app::AppState& s)
             }
             if (ImGui::MenuItem("Follow in Regions"))
                 s.regionsFollow = true;
+            // Symbols for the module this line lives in, without going hunting
+            // for its row in the Modules pane.
+            if (const mem::ModuleEntry* m = app::findModule(s, d.addr))
+                if (ImGui::BeginMenu("Symbols"))
+                {
+                    symbolsContextMenu(s, *m);
+                    ImGui::EndMenu();
+                }
             if (ImGui::MenuItem("Go to Address", "Ctrl+G"))
             {
                 s.gotoDisasmInput[0] = '\0';

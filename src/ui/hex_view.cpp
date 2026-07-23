@@ -49,7 +49,7 @@ void drawHex(app::AppState& s)
     int labelW = kAddrLabelWidth;
     for (int r = 0; r < rows; ++r)
     {
-        char lbl[40];
+        char lbl[app::kAddrLabelMax + 24];
         app::formatAddrLabel(s, s.hexAddr + (uintptr_t)r * 16, lbl, sizeof(lbl));
         labels[(size_t)r] = lbl;
         const int L = (int)labels[(size_t)r].size();

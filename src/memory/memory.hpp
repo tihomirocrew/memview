@@ -173,6 +173,7 @@ struct ModuleEntry {
     uintptr_t   base;
     size_t      size;
     std::string name; // short file name, e.g. "ntdll.dll"
+    std::string path; // full path on disk, for the .pdb sitting next to it
 };
 
 // Loaded modules in Toolhelp order (main .exe first). Used to label addresses
@@ -188,12 +189,14 @@ inline std::vector<ModuleEntry> list_modules(const Process& proc)
     if (Module32FirstW(snap, &me))
     {
         do {
-            char buf[MAX_PATH];
+            char buf[MAX_PATH], pathBuf[MAX_PATH];
             WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, buf, sizeof(buf), nullptr, nullptr);
+            WideCharToMultiByte(CP_UTF8, 0, me.szExePath, -1, pathBuf, sizeof(pathBuf), nullptr, nullptr);
             out.push_back({
                 reinterpret_cast<uintptr_t>(me.modBaseAddr),
                 (size_t)me.modBaseSize,
-                buf
+                buf,
+                pathBuf
             });
         } while (Module32NextW(snap, &me));
     }

@@ -4,6 +4,7 @@
 #include "memory/value_format.hpp"
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* for the layout, FindWindowByName for modals
+#include <cmath>  // sinf for the indeterminate progress sweep
 #include <cstdio>
 #include <cstdlib> // strtoull for hex value entry
 #include <string>
@@ -264,6 +265,70 @@ void drawHexEditValueModal(app::AppState& s)
     ImGui::End();
 }
 
+// Bottom status strip: what the symbol worker is doing right now - download
+// progress, a local parse, and the queue behind it. Only drawn while a load is
+// running, so there's no idle state here. Reads only thread-safe accessors.
+void drawSymbolStatusBar(app::AppState& s)
+{
+    auto mb = [](uint64_t bytes) { return (double)bytes / (1024.0 * 1024.0); };
+
+    const std::string active = s.symbols.activeName();
+    const uint64_t    got    = s.symbols.progress().received.load();
+    const uint64_t    total  = s.symbols.progress().total.load();
+
+    // received/total only move during a download, so non-zero means a fetch;
+    // otherwise the worker is searching disk or parsing a local PDB.
+    const bool downloading = (got != 0 || total != 0);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(downloading ? "Downloading" : "Loading");
+    // active_ is briefly empty between jobs while the queue drains; skip the
+    // name then rather than flashing a blank.
+    if (!active.empty())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", active.c_str());
+    }
+
+    if (const size_t queued = s.symbols.pending(); queued > 1)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(+%zu queued)", queued - 1);
+    }
+
+    ImGui::SameLine();
+    // Leave room for the Cancel button at the right edge; the bar fills the
+    // rest. Both are frame-height, so they sit level with the label.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float cancelW = ImGui::CalcTextSize("Cancel").x + st.FramePadding.x * 2.0f;
+    float barW = ImGui::GetContentRegionAvail().x - cancelW - st.ItemSpacing.x;
+    if (barW < 60.0f) barW = 60.0f;
+    const ImVec2 barSz(barW, ImGui::GetFrameHeight());
+
+    if (downloading && total > 0)
+    {
+        char overlay[48];
+        snprintf(overlay, sizeof(overlay), "%.1f / %.1f MB", mb(got), mb(total));
+        ImGui::ProgressBar((float)got / (float)total, barSz, overlay);
+    }
+    else
+    {
+        // No known length (server sent none) or a local parse: sweep an
+        // indeterminate bar so the UI clearly reads as "working".
+        const float t = (float)ImGui::GetTime();
+        const float frac = 0.5f + 0.5f * sinf(t * 3.0f);
+        char overlay[32] = "";
+        if (downloading) snprintf(overlay, sizeof(overlay), "%.1f MB", mb(got));
+        ImGui::ProgressBar(frac, barSz, overlay);
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel"))
+        s.symbols.cancelPending();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Stop loading symbols and clear the queue.");
+}
+
 } // namespace
 
 void drawMemoryView(app::AppState& s)
@@ -284,9 +349,13 @@ void drawMemoryView(app::AppState& s)
     alwaysOwnWindow.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
     ImGui::SetNextWindowClass(&alwaysOwnWindow);
     // NoResize: resizing is done by the native OS border (see kPaneFlags).
+    // NoScrollbar/NoScrollWithMouse: this window is just a fixed host for the
+    // dockspace and the status strip, so it must never scroll - the panes inside
+    // handle their own scrolling.
     const ImGuiWindowFlags memViewFlags = ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking |
-        ImGuiWindowFlags_NoResize;
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse;
     if (!ImGui::Begin("Memory View", &s.showMemView, memViewFlags))
     {
         ImGui::End();
@@ -422,8 +491,21 @@ void drawMemoryView(app::AppState& s)
         ImGui::DockBuilderDockWindow("Hex View", bottomId);
         ImGui::DockBuilderFinish(dockId);
     }
+    // The status strip only shows while a load runs; when idle the dockspace
+    // fills the window. It's a Separator plus one frame-height row, so reserve
+    // that height and the two spacing gaps below the dockspace.
+    const bool showStatus = s.symbols.busy();
+    const float footerH = showStatus
+        ? ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y * 2.0f
+        : 0.0f;
     // NoWindowMenuButton removes the little arrow/menu button on the tab bars.
-    ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_NoWindowMenuButton);
+    ImGui::DockSpace(dockId, ImVec2(0, -footerH), ImGuiDockNodeFlags_NoWindowMenuButton);
+
+    if (showStatus)
+    {
+        ImGui::Separator();
+        drawSymbolStatusBar(s);
+    }
 
     ImGui::End();
 

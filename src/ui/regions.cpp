@@ -3,10 +3,26 @@
 #include "memory/memory.hpp"
 #include <imgui.h>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace ui {
 
 namespace {
+
+// Case-insensitive substring test for the Modules name filter. Empty filter
+// matches everything.
+bool nameContains(const std::string& name, const char* needle)
+{
+    if (!needle || !needle[0]) return true;
+    const size_t nlen = name.size();
+    const size_t flen = strlen(needle);
+    if (flen > nlen) return false;
+    for (size_t i = 0; i + flen <= nlen; ++i)
+        if (_strnicmp(name.c_str() + i, needle, flen) == 0)
+            return true;
+    return false;
+}
 
 // "RWX"-style protection flags for a region.
 void protString(DWORD prot, char out[4])
@@ -203,30 +219,65 @@ void drawModules(app::AppState& s)
                 (unsigned long long)s.disasmAddr);
     }
 
-    ImGui::Text("%d modules", (int)s.modules.size());
+    // Rows passing the name filter, by index into s.modules. Built each frame -
+    // a few hundred short comparisons is nothing next to the table draw.
+    std::vector<int> rows;
+    rows.reserve(s.modules.size());
+    for (int i = 0; i < (int)s.modules.size(); ++i)
+        if (nameContains(s.modules[i].name, s.moduleFilter))
+            rows.push_back(i);
+
+    if (s.moduleFilter[0])
+        ImGui::Text("%d / %d modules", (int)rows.size(), (int)s.modules.size());
+    else
+        ImGui::Text("%d modules", (int)s.modules.size());
+
+    // Bulk symbol load: the only entry point for "fetch everything up front".
+    // Cheap to re-press - requestModuleSymbols skips modules already loaded,
+    // queued, or known to have none. Progress shows in the status strip below.
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!s.symbols.settings().enabled);
+    if (ImGui::SmallButton("Load all symbols"))
+        app::requestAllModuleSymbols(s);
+    ImGui::EndDisabled();
+    // AllowWhenDisabled: without it the "turned off" explanation below would
+    // never show, since the button is disabled in exactly that case.
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(s.symbols.settings().enabled
+            ? (s.symbols.settings().useServer
+                ? "Look for every module's PDB, downloading what's missing."
+                : "Look for every module's PDB on disk.\n"
+                  "Turn on the symbol server in Settings to download the rest.")
+            : "Symbols are turned off in Settings.");
+
     ImGui::SameLine();
     ImGui::TextDisabled("(double-click a row to view it)");
+
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##modfilter", "Filter by name...",
+        s.moduleFilter, sizeof(s.moduleFilter));
 
     const ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
 
-    if (!ImGui::BeginTable("##modules", 3, flags))
+    if (!ImGui::BeginTable("##modules", 4, flags))
         return;
 
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("Address");
     ImGui::TableSetupColumn("Size");
+    ImGui::TableSetupColumn("Syms");
     ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableHeadersRow();
 
     ImGuiListClipper clipper;
-    clipper.Begin((int)s.modules.size());
+    clipper.Begin((int)rows.size());
     while (clipper.Step())
     {
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r)
         {
-            const mem::ModuleEntry& m = s.modules[i];
+            const mem::ModuleEntry& m = s.modules[rows[r]];
             ImGui::TableNextRow();
 
             ImGui::TableSetColumnIndex(0);
@@ -258,13 +309,19 @@ void drawModules(app::AppState& s)
                 }
                 if (ImGui::MenuItem("Copy Name"))
                     ImGui::SetClipboardText(m.name.c_str());
+                ImGui::Separator();
+                symbolsContextMenu(s, m);
                 ImGui::EndPopup();
             }
 
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%llX", (unsigned long long)m.size);
 
+            // Symbol count, or why there are none. Right-click loads them.
             ImGui::TableSetColumnIndex(2);
+            symbolStatusCell(s.symbols.find(m.base));
+
+            ImGui::TableSetColumnIndex(3);
             ImGui::TextUnformatted(m.name.c_str());
         }
     }

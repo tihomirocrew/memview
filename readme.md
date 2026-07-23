@@ -4,7 +4,7 @@ A lightweight process memory scanner/editor for Windows.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6)
 ![Language](https://img.shields.io/badge/C%2B%2B-23-f34b7d)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](license.md)
 
 > memview is intended for learning, debugging, and inspecting
 > processes you own or are authorized to analyze. Don't use it to tamper with
@@ -21,8 +21,10 @@ A lightweight process memory scanner/editor for Windows.
 - **Address List** - saved addresses with descriptions and types
 - **Hex View** and **Disassembly** - live memory viewing with syntax highlighting
 - **Regions** - a map of the process's memory regions
+- **Modules** - a list of the process's loaded modules
 - **Assembler/Disassembler** - edit instructions on the fly (asmjit + Zydis), NOP-fill
 - **Signatures** - AOB signature generation
+- **Symbols** - PDB symbols per module, from disk or symbol server
 
 ## requirements
 

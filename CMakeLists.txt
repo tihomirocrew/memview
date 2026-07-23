@@ -42,6 +42,9 @@ add_executable(${PROJECT_NAME} WIN32
     src/memory/value_format.cpp
     src/memory/scan_session.cpp
     src/memory/signature.cpp
+    src/memory/pdb.cpp
+    src/memory/symbol_server.cpp
+    src/memory/symbol_store.cpp
     src/app/app.cpp
     src/app/config.cpp
     src/ui/toolbar.cpp
@@ -52,6 +55,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/ui/disasm.cpp
     src/ui/hex_view.cpp
     src/ui/regions.cpp
+    src/ui/symbols.cpp
     ${ASMTK_DIR}/src/asmtk/asmparser.cpp
     ${ASMTK_DIR}/src/asmtk/asmtokenizer.cpp
 )
@@ -76,5 +80,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dxgi
     d3dcompiler
     shell32
+    ole32     # CoTaskMemFree, for SHGetKnownFolderPath's result
+    comdlg32  # GetOpenFileName, for "Load PDB from File..."
     dwmapi
+    winhttp
 )

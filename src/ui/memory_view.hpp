@@ -12,11 +12,18 @@ namespace ui {
 // Entry point, called once per frame.
 void drawMemoryView(app::AppState& s);
 
-// The four panes (each in its own dockable window).
+// The panes (each in its own dockable window).
 void drawDisasm(app::AppState& s);
 void drawHex(app::AppState& s);
 void drawRegions(app::AppState& s);
 void drawModules(app::AppState& s);
+
+// Symbol actions for one module (Load/Reload/Load PDB from File). Shared by the
+// Modules table and the Disassembly context menu; call inside an open popup.
+void symbolsContextMenu(app::AppState& s, const mem::ModuleEntry& m);
+
+// One table cell: a module's symbol count, or why it hasn't got any.
+void symbolStatusCell(const mem::ModuleSymbols* ms);
 
 // Modals opened from the Disassembly context menu (all in disasm.cpp).
 void drawAssembleModal(app::AppState& s);      // assemble text -> bytes

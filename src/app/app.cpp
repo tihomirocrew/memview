@@ -37,9 +37,7 @@ void App::setupStyle()
     style.WindowPadding     = ImVec2(6, 6);
 }
 
-// Custom dark palette (used instead of ImGui::StyleColorsDark()): graphite
-// blue-tinted backgrounds with a neutral grey accent.
-static void styleColorsDarkCustom()
+static void styleColorsDark()
 {
     ImVec4* c = ImGui::GetStyle().Colors;
 
@@ -123,6 +121,13 @@ static void styleColorsDarkCustom()
     c[ImGuiCol_ModalWindowDimBg]          = ImVec4(0, 0, 0, 0.50f);
 }
 
+static void styleColorsLight()
+{
+    ImGui::StyleColorsLight();
+    ImVec4* c = ImGui::GetStyle().Colors;
+    c[ImGuiCol_PlotHistogram] = c[ImGuiCol_Button];
+}
+
 bool beginBlockingModal(const char* title, bool* p_open,
                         const ImGuiViewport* vp, float width, float height)
 {
@@ -184,7 +189,7 @@ bool beginBlockingModal(const char* title, bool* p_open,
 void applyTheme(AppState& s, bool dark)
 {
     s.darkTheme = dark;
-    dark ? styleColorsDarkCustom() : ImGui::StyleColorsLight();
+    dark ? styleColorsDark() : styleColorsLight();
 
     ImGuiStyle& style = ImGui::GetStyle();
 
@@ -226,6 +231,13 @@ void App::drawFrame()
     pollProcessAlive(state_);
 
     state_.scan.poll(state_.proc);
+
+    // Publish anything the symbol worker finished since the last frame, so
+    // freshly loaded names show up in disassembly labels and expressions.
+    state_.symbols.pump();
+    // Feed the worker a few more modules from a pending "load all", spreading the
+    // per-module PE reads across frames rather than stalling the click frame.
+    pumpSymbolScan(state_);
 
     // Pin the root window to the main viewport, so the UI stays inside the main
     // OS window rather than spawning its own.
@@ -417,6 +429,9 @@ void onProcessExited(AppState& s)
     s.memRegions.clear();
     s.exportCache.clear();
     s.sectionCache.clear();
+    // Stops the worker too, so an in-flight download doesn't outlive the target.
+    s.symbols.clear();
+    s.symScanQueue.clear();
     s.procIconPath.clear();
     s.modulesNextRefresh = 0.0;
     s.regionsNextRefresh = 0.0;
@@ -467,6 +482,14 @@ bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
     s.resultSel.clear();
     s.selAnchor = -1;
     s.scan.reset();
+
+    // Everything read out of the previous target's address space.
+    s.modules.clear();
+    s.exportCache.clear();
+    s.sectionCache.clear();
+    s.symbols.clear();
+    s.symScanQueue.clear();
+    s.modulesNextRefresh = 0.0;
 
     // Drop any in-flight Find Signature so a stale hit can't jump after re-attach.
     s.findSigScan.reset();
@@ -586,8 +609,175 @@ const char* findSectionName(const AppState& s, const mem::ModuleEntry& mod, uint
     return nullptr; // before the first section: the PE header region
 }
 
+namespace {
+
+// A module's name without its final extension: "kernel32.dll" -> "kernel32".
+// Both the label and the "module.Symbol" expression syntax use this spelling.
+std::string moduleBaseName(const std::string& name)
+{
+    const size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+} // namespace
+
+void requestModuleSymbols(const AppState& s, const mem::ModuleEntry& m,
+    bool force, const char* forcedPath, bool verify)
+{
+    if (!s.proc.is_open()) return;
+    if (!s.symbols.settings().enabled && !forcedPath) return;
+    // Already loaded, queued, or known to have nothing: skip the PE reads below,
+    // so "Load All" over a hundred modules costs nothing the second time.
+    if (!force && s.symbols.find(m.base)) return;
+
+    mem::SymbolJob job;
+    job.modBase = m.base;
+    job.modName = m.name;
+    job.modPath = m.path;
+    job.verify  = verify;
+    if (forcedPath) job.forcedPath = forcedPath;
+
+    // Read the section table and the debug record together off one page of PE
+    // headers - a couple of syscalls instead of ~25. Times every module, that
+    // burst is what stalled a bulk load.
+    std::vector<mem::Section> sections;
+    bool hasRef = false;
+    if (!mem::read_symbol_inputs(s.proc, m, sections, job.ref, hasRef))
+    {
+        s.symbols.setFailed(m.base, "module has no readable PE headers");
+        return;
+    }
+    // A module with no CodeView record has nothing to look for. Record that
+    // once so the lazy path doesn't retry it on every frame.
+    if (!hasRef)
+    {
+        s.symbols.setFailed(m.base, "module carries no debug record");
+        return;
+    }
+    if (sections.empty())
+    {
+        s.symbols.setFailed(m.base, "module has no readable section table");
+        return;
+    }
+    for (const mem::Section& sec : sections)
+        job.sections.push_back({(uint32_t)(sec.base - m.base), (uint32_t)sec.size});
+
+    s.symbols.request(std::move(job), force);
+}
+
+void requestAllModuleSymbols(const AppState& s)
+{
+    // Just queue the bases; pumpSymbolScan reads them a few per frame. Scanning
+    // a few hundred modules right here is the click-frame stall we want to avoid.
+    s.symScanQueue.clear();
+    s.symScanQueue.reserve(s.modules.size());
+    for (const mem::ModuleEntry& m : s.modules)
+        s.symScanQueue.push_back(m.base);
+}
+
+void pumpSymbolScan(const AppState& s)
+{
+    if (s.symScanQueue.empty()) return;
+
+    // Enough that a bulk load finishes in well under a second at 60 fps, few
+    // enough that the per-module header reads never add up to a visible hitch.
+    constexpr size_t kPerFrame = 12;
+    for (size_t n = 0; n < kPerFrame && !s.symScanQueue.empty(); ++n)
+    {
+        const uintptr_t base = s.symScanQueue.back();
+        s.symScanQueue.pop_back();
+        // Re-resolve by base: the module list may have been refreshed since the
+        // button was pressed, so a base could be gone. requestModuleSymbols also
+        // skips anything already loaded or in flight, so this stays cheap.
+        if (const mem::ModuleEntry* m = findModule(s, base))
+            requestModuleSymbols(s, *m);
+    }
+}
+
+// Defined in the helper namespace below; declared here so findSymbolAt can fall
+// back to it before its definition appears.
+namespace {
+bool nearestExportAt(const AppState& s, const mem::ModuleEntry& m,
+    uintptr_t addr, SymHit& out);
+}
+
+bool findSymbolAt(const AppState& s, uintptr_t addr, SymHit& out)
+{
+    const mem::ModuleEntry* m = findModule(s, addr);
+    if (!m) return false;
+
+    // PDB symbols first: richer than exports (locals, statics, non-exported
+    // functions) and authoritative when a matching PDB is loaded. Gated by the
+    // symbol master switch; exports below are plain PE metadata and always on.
+    if (s.symbols.settings().enabled)
+    {
+        const mem::ModuleSymbols* ms = s.symbols.find(m->base);
+        if (!ms)
+        {
+            // First address seen in this module: start the load and fall back
+            // to exports until it lands.
+            requestModuleSymbols(s, *m);
+        }
+        else if (ms->status == mem::SymStatus::Loaded)
+        {
+            const std::vector<mem::PdbSymbol>& v = ms->syms.byRva;
+            const uint32_t rva = (uint32_t)(addr - m->base);
+
+            auto it = std::upper_bound(v.begin(), v.end(), rva,
+                [](uint32_t r, const mem::PdbSymbol& sym) { return r < sym.rva; });
+            if (it != v.begin())
+            {
+                --it;
+                // Aliases share an RVA (NtCreateFile/ZwCreateFile); take the
+                // first of the run so the label doesn't depend on where the
+                // binary search landed.
+                while (it != v.begin() && (it - 1)->rva == it->rva) --it;
+
+                // Past the end of the last symbol in its section is padding, not
+                // a 400 KB offset into some function; let exports try instead.
+                if (!(it->size && rva >= it->rva + it->size))
+                {
+                    out.name   = &it->name;
+                    out.module = m;
+                    out.base   = m->base + it->rva;
+                    out.disp   = rva - it->rva;
+                    return true;
+                }
+            }
+        }
+    }
+
+    // No PDB name for this address: fall back to the nearest PE export.
+    return nearestExportAt(s, *m, addr, out);
+}
+
 void formatAddrLabel(const AppState& s, uintptr_t addr, char* out, size_t n)
 {
+    SymHit hit;
+    if (findSymbolAt(s, addr, hit))
+    {
+        // "ntdll.NtCreateFile+11", the same spelling Go to accepts back.
+        const std::string mod = moduleBaseName(hit.module->name);
+
+        // Drop the parameter list - it doesn't fit the address column, and the
+        // qualified name alone identifies the symbol.
+        std::string sym = *hit.name;
+        if (const size_t paren = sym.find('('); paren != std::string::npos)
+            sym.resize(paren);
+        if ((int)sym.size() > kAddrLabelMax - 8)
+        {
+            sym.resize((size_t)kAddrLabelMax - 10);
+            sym += "..";
+        }
+
+        if (hit.disp)
+            snprintf(out, n, "%s.%s+%llX", mod.c_str(), sym.c_str(),
+                (unsigned long long)hit.disp);
+        else
+            snprintf(out, n, "%s.%s", mod.c_str(), sym.c_str());
+        return;
+    }
+
     if (const mem::ModuleEntry* m = findModule(s, addr))
     {
         const uintptr_t off = addr - m->base;
@@ -635,13 +825,6 @@ std::string toLowerStr(std::string s)
     return s;
 }
 
-// A module's name without its final extension: "kernel32.dll" -> "kernel32".
-std::string moduleBaseName(const std::string& name)
-{
-    const size_t dot = name.find_last_of('.');
-    return dot == std::string::npos ? name : name.substr(0, dot);
-}
-
 // Parse and cache module `m`'s export table on first use; return the cache entry.
 const AppState::ModuleExports& ensureExports(const AppState& s, const mem::ModuleEntry& m)
 {
@@ -654,15 +837,117 @@ const AppState::ModuleExports& ensureExports(const AppState& s, const mem::Modul
     {
         me.byName.emplace(toLowerStr(e.name), e.addr);
         me.names.push_back(e.name);
+        me.byAddr.push_back({e.addr, e.name});
     }
-    std::sort(me.names.begin(), me.names.end());
+    // Case-insensitive, matching how PdbSymbols::names is ordered, so the
+    // autocomplete can prefix-scan either list the same way.
+    std::sort(me.names.begin(), me.names.end(),
+        [](const std::string& a, const std::string& b) {
+            return _stricmp(a.c_str(), b.c_str()) < 0;
+        });
+    // Address order for the reverse (address -> name) lookup; ties broken by
+    // name so the label doesn't depend on export-table order.
+    std::sort(me.byAddr.begin(), me.byAddr.end(),
+        [](const AppState::ModuleExports::ExportAddr& a,
+           const AppState::ModuleExports::ExportAddr& b) {
+            return a.addr != b.addr ? a.addr < b.addr : a.name < b.name;
+        });
     return s.exportCache.emplace(std::move(key), std::move(me)).first->second;
 }
 
-// Resolve "<module>.<export>" (module with or without its extension, e.g.
-// "kernel32.CreateFileW") to the export's address; `next` gets the token's end.
+// Nearest export at or before `addr` within `m`. Exports carry no size, so each
+// runs to the next distinct address (or the module end); an address past that
+// isn't named, so we don't print a huge offset from an unrelated export. Caches
+// the export table on first use, like the "module.Symbol" lookups.
+bool nearestExportAt(const AppState& s, const mem::ModuleEntry& m,
+    uintptr_t addr, SymHit& out)
+{
+    const AppState::ModuleExports& ex = ensureExports(s, m);
+    const std::vector<AppState::ModuleExports::ExportAddr>& v = ex.byAddr;
+    if (v.empty()) return false;
+
+    auto it = std::upper_bound(v.begin(), v.end(), addr,
+        [](uintptr_t a, const AppState::ModuleExports::ExportAddr& e) {
+            return a < e.addr;
+        });
+    if (it == v.begin()) return false; // before the first export
+    --it;
+
+    // Aliases share an address; take the first of the run for a stable label.
+    while (it != v.begin() && (it - 1)->addr == it->addr) --it;
+
+    // The export's range ends at the next distinct address, or the module end.
+    uintptr_t rangeEnd = m.base + m.size;
+    for (auto nx = it + 1; nx != v.end(); ++nx)
+        if (nx->addr > it->addr) { rangeEnd = nx->addr; break; }
+    if (addr >= rangeEnd) return false;
+
+    out.name   = &it->name;
+    out.module = &m;
+    out.base   = it->addr;
+    out.disp   = addr - it->addr;
+    return true;
+}
+
+// A module's loaded PDB symbols, or nullptr. When `eager`, a module nobody has
+// asked about yet gets queued, so naming it is enough to pull its symbols in.
+const mem::PdbSymbols* loadedSymbols(const AppState& s, const mem::ModuleEntry& m,
+    bool eager)
+{
+    if (!s.symbols.settings().enabled) return nullptr;
+
+    const mem::ModuleSymbols* ms = s.symbols.find(m.base);
+    if (!ms)
+    {
+        if (eager) requestModuleSymbols(s, m);
+        return nullptr;
+    }
+    return ms->status == mem::SymStatus::Loaded ? &ms->syms : nullptr;
+}
+
+// Look `sym` (already lower-cased) up in `m`: exports first, then PDB symbols.
+//
+// `eager` says whether a miss may pay to parse. The qualified form names one
+// module, so parsing it is fair. The unqualified form sweeps every module every
+// frame while a Go-to field has focus, so it stays lazy - it only sees what's
+// already parsed, never forcing a hundred export tables to be re-read.
+bool lookupInModule(const AppState& s, const mem::ModuleEntry& m,
+    const std::string& sym, bool eager, uintptr_t& addr)
+{
+    const AppState::ModuleExports* ex = nullptr;
+    if (eager)
+        ex = &ensureExports(s, m);
+    else if (auto it = s.exportCache.find(toLowerStr(m.name)); it != s.exportCache.end())
+        ex = &it->second;
+
+    if (ex)
+        if (auto it = ex->byName.find(sym); it != ex->byName.end())
+        {
+            addr = it->second;
+            return true;
+        }
+
+    if (const mem::PdbSymbols* ps = loadedSymbols(s, m, eager))
+        if (auto it = ps->byName.find(sym); it != ps->byName.end())
+        {
+            addr = m.base + it->second;
+            return true;
+        }
+    return false;
+}
+
+// Resolve a symbol term to an address; `next` gets the token's end. Two forms:
+//   "<module>.<symbol>"  module with or without its extension ("kernel32.CreateFileW")
+//   "<symbol>"           searched across every module, main .exe first
+// Names may hold '.', '@', '?' and '$' (decorated/mangled), so a term only ends
+// at +/-/space - which is why the qualified form is tried module by module
+// rather than by splitting on the last dot.
 bool matchSymbolAt(const AppState& s, const char* p, uintptr_t& addr, const char*& next)
 {
+    const char* end = p;
+    while (!isTermBoundary(*end)) ++end;
+    if (end == p) return false;
+
     for (const mem::ModuleEntry& m : s.modules)
     {
         const std::string full = m.name;
@@ -672,25 +957,29 @@ bool matchSymbolAt(const AppState& s, const char* p, uintptr_t& addr, const char
             const size_t len = mn->size();
             if (len == 0 || _strnicmp(p, mn->c_str(), len) != 0 || p[len] != '.')
                 continue;
+            if (p + len + 1 >= end) continue; // "module." with no symbol
 
-            // The export name runs to the next term boundary. Names may hold '.',
-            // '@', '?', '$' (decorated/mangled symbols), so only +/-/space end it.
-            const char* symStart = p + len + 1;
-            const char* symEnd   = symStart;
-            while (!isTermBoundary(*symEnd)) ++symEnd;
-            if (symEnd == symStart) continue; // "module." with no symbol
-
-            const std::string sym = toLowerStr(std::string(symStart, symEnd - symStart));
-            const AppState::ModuleExports& ex = ensureExports(s, m);
-            auto it = ex.byName.find(sym);
-            if (it != ex.byName.end())
+            const std::string sym =
+                toLowerStr(std::string(p + len + 1, end - (p + len + 1)));
+            if (lookupInModule(s, m, sym, /*eager=*/true, addr))
             {
-                addr = it->second;
-                next = symEnd;
+                next = end;
                 return true;
             }
         }
     }
+
+    // Unqualified: modules are in Toolhelp order, so the main .exe wins a name
+    // it shares with a DLL - and it's the only one worth parsing on demand, since
+    // that's where a bare name almost always points.
+    const std::string bare = toLowerStr(std::string(p, end - p));
+    for (size_t i = 0; i < s.modules.size(); ++i)
+        if (lookupInModule(s, s.modules[i], bare, /*eager=*/i == 0, addr))
+        {
+            next = end;
+            return true;
+        }
+
     return false;
 }
 
@@ -766,13 +1055,47 @@ bool parseAddrExpr(const AppState& s, const char* text, uintptr_t& out)
 
 namespace {
 
-// Cap matches per frame: export tables run to thousands, and the user narrows by
-// typing anyway. The dropdown scrolls up to this many.
+// Cap matches per frame: a system DLL's publics run to tens of thousands, and
+// the user narrows by typing anyway. The dropdown scrolls up to this many.
 constexpr int kMaxSuggest = 50;
 
+// Case-insensitive prefix scan over a case-insensitively sorted name list: the
+// matches form one contiguous run, so it costs a binary search plus the hits.
+// Names holding a space (undecorated C++ signatures) are skipped - a term ends
+// at whitespace, so they could never be typed back into an expression.
+void collectPrefixMatches(const std::vector<std::string>& sorted,
+    const std::string& prefix, std::vector<std::string>& out)
+{
+    auto lessNoCase = [](const std::string& a, const std::string& b) {
+        return _stricmp(a.c_str(), b.c_str()) < 0;
+    };
+
+    auto it = std::lower_bound(sorted.begin(), sorted.end(), prefix, lessNoCase);
+    for (; it != sorted.end() && (int)out.size() < kMaxSuggest; ++it)
+    {
+        if (it->size() < prefix.size() ||
+            _strnicmp(it->c_str(), prefix.c_str(), prefix.size()) != 0)
+            break; // past the run
+        if (it->find(' ') == std::string::npos) out.push_back(*it);
+    }
+}
+
+// Sort + drop case-insensitive duplicates, then trim to the display cap.
+void dedupeNoCase(std::vector<std::string>& v)
+{
+    std::sort(v.begin(), v.end(), [](const std::string& a, const std::string& b) {
+        return _stricmp(a.c_str(), b.c_str()) < 0;
+    });
+    v.erase(std::unique(v.begin(), v.end(),
+        [](const std::string& a, const std::string& b) {
+            return _stricmp(a.c_str(), b.c_str()) == 0;
+        }), v.end());
+    if ((int)v.size() > kMaxSuggest) v.resize(kMaxSuggest);
+}
+
 // Completions for the term under the cursor, as full replacement tokens:
-//   "module.<partial>" -> that module's exports ("kernel32.CreateFileW")
-//   bare "<partial>"    -> loaded module names
+//   "module.<partial>" -> that module's exports and PDB symbols
+//   bare "<partial>"    -> module names, then symbols from modules already loaded
 // Reports the term's span via termStart/termLen.
 int collectSuggestions(const AppState& s, const char* buf, int cursor,
     int& termStart, int& termLen, std::vector<std::string>& out)
@@ -788,8 +1111,9 @@ int collectSuggestions(const AppState& s, const char* buf, int cursor,
 
     const std::string term(buf + start, (size_t)termLen);
 
-    // "module.<partial>": complete an export name. Match the module by its full or
-    // base name, spelled exactly as typed up to the '.', then filter its exports.
+    // "module.<partial>": complete a symbol name. Match the module by its full or
+    // base name, spelled exactly as typed up to the '.', then filter its exports
+    // and PDB symbols together.
     if (term.find('.') != std::string::npos)
     {
         for (const mem::ModuleEntry& m : s.modules)
@@ -804,27 +1128,45 @@ int collectSuggestions(const AppState& s, const char* buf, int cursor,
 
                 const std::string typedPrefix = term.substr(0, len + 1); // "kernel32."
                 const std::string sympart     = term.substr(len + 1);
-                const AppState::ModuleExports& ex = ensureExports(s, m);
 
-                for (const std::string& name : ex.names)
-                {
-                    if ((int)out.size() >= kMaxSuggest) break;
-                    if (name.size() >= sympart.size() &&
-                        _strnicmp(name.c_str(), sympart.c_str(), sympart.size()) == 0)
-                        out.push_back(typedPrefix + name);
-                }
+                // Exports and publics overlap almost entirely, so merge and dedupe
+                // rather than showing every exported function twice.
+                std::vector<std::string> cand;
+                collectPrefixMatches(ensureExports(s, m).names, sympart, cand);
+                if (const mem::PdbSymbols* ps = loadedSymbols(s, m, /*eager=*/true))
+                    collectPrefixMatches(ps->names, sympart, cand);
+                dedupeNoCase(cand);
+
+                for (const std::string& name : cand)
+                    out.push_back(typedPrefix + name);
                 return (int)out.size();
             }
         }
     }
 
-    // Otherwise: complete a module name.
+    // Otherwise: module names first, then unqualified symbols from whatever
+    // modules already have symbols loaded (never forcing a parse here - this
+    // runs on every keystroke).
     for (const mem::ModuleEntry& m : s.modules)
     {
         if ((int)out.size() >= kMaxSuggest) break;
         if ((int)m.name.size() >= termLen &&
             _strnicmp(buf + termStart, m.name.c_str(), (size_t)termLen) == 0)
             out.push_back(m.name);
+    }
+
+    std::vector<std::string> syms;
+    for (const mem::ModuleEntry& m : s.modules)
+    {
+        if ((int)syms.size() >= kMaxSuggest) break;
+        if (const mem::PdbSymbols* ps = loadedSymbols(s, m, /*eager=*/false))
+            collectPrefixMatches(ps->names, term, syms);
+    }
+    dedupeNoCase(syms);
+    for (const std::string& name : syms)
+    {
+        if ((int)out.size() >= kMaxSuggest) break;
+        out.push_back(name);
     }
     return (int)out.size();
 }
