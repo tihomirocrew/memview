@@ -781,6 +781,10 @@ void requestModuleSymbols(const AppState& s, const mem::ModuleEntry& m,
 
 void requestAllModuleSymbols(const AppState& s)
 {
+    // Retry what Cancel interrupted. The rest keep their answer, so a re-press
+    // doesn't walk the servers again for modules that have no PDB anywhere.
+    s.symbols.retryFailed(/*cancelledOnly=*/true);
+
     // Just queue the bases; pumpSymbolScan reads them a few per frame. Scanning
     // a few hundred modules right here is the click-frame stall we want to avoid.
     s.symScanQueue.clear();

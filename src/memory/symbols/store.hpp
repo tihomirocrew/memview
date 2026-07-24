@@ -33,6 +33,10 @@ struct ModuleSymbols {
     std::pmr::monotonic_buffer_resource arena;
 
     SymStatus   status = SymStatus::None;
+
+    bool        permanent = false; // nothing to search: no debug record at all
+    bool        cancelled = false; // search cut short, so the miss proves nothing
+
     std::string note;    // where they came from, or why they're missing
     std::string pdbPath; // the file that was actually loaded
     PdbSymbols  syms{&arena};
@@ -89,7 +93,7 @@ public:
     bool pump();
 
     // Null until a load for that module has finished. Stays valid until the
-    // next pump() that replaces it, or clear().
+    // next pump() that replaces it, retryFailed() that drops it, or clear().
     const ModuleSymbols* find(uintptr_t modBase) const;
     const std::unordered_map<uintptr_t, ModuleSymbolsPtr>& all() const { return map_; }
 
@@ -101,6 +105,11 @@ public:
     // Load All picks them up again. The worker stays alive for the next request.
     void cancelPending();
 
+    // Forget "no PDB found" so it gets looked for again: pass false when the
+    // search settings changed, true for just the cancelled ones. Returns the
+    // count dropped.
+    size_t retryFailed(bool cancelledOnly);
+
     bool                    busy() const;
     size_t                  pending() const;
     std::string             activeName() const; // module being worked on
@@ -110,6 +119,8 @@ private:
     void workerMain();
     void ensureWorker();
     ModuleSymbolsPtr runJob(const SymbolJob& job);
+
+    SymbolSettings jobSettings() const; // cfg_ with the default cache filled in
 
     // Main thread only.
     std::unordered_map<uintptr_t, ModuleSymbolsPtr> map_;

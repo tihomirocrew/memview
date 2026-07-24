@@ -34,6 +34,13 @@ void SymbolStore::ensureWorker()
     SetThreadPriority(worker_.native_handle(), THREAD_PRIORITY_BELOW_NORMAL);
 }
 
+SymbolSettings SymbolStore::jobSettings() const
+{
+    SymbolSettings cfg = cfg_;
+    if (cfg.cacheDir.empty()) cfg.cacheDir = default_symbol_cache();
+    return cfg;
+}
+
 void SymbolStore::request(SymbolJob job, bool force)
 {
     if (!force)
@@ -43,8 +50,7 @@ void SymbolStore::request(SymbolJob job, bool force)
         if (it != map_.end() && it->second->status != SymStatus::None) return;
     }
 
-    job.cfg = cfg_;
-    if (job.cfg.cacheDir.empty()) job.cfg.cacheDir = default_symbol_cache();
+    job.cfg = jobSettings();
 
     inflight_.insert(job.modBase);
     ModuleSymbolsPtr& slot = map_[job.modBase];
@@ -71,8 +77,10 @@ void SymbolStore::setFailed(uintptr_t modBase, std::string note)
 {
     ModuleSymbolsPtr& slot = map_[modBase];
     if (!slot) slot = std::make_unique<ModuleSymbols>();
-    slot->status = SymStatus::Failed;
-    slot->note   = std::move(note);
+    slot->status    = SymStatus::Failed;
+    slot->note      = std::move(note);
+    slot->permanent = true;
+    slot->cancelled = false;
 }
 
 bool SymbolStore::pump()
@@ -159,6 +167,35 @@ void SymbolStore::cancelPending()
     }
 }
 
+size_t SymbolStore::retryFailed(bool cancelledOnly)
+{
+    // Erase rather than reset to None: a null find() is what makes the callers
+    // queue the module again. map_ is main-thread only, so no lock.
+    size_t dropped = 0;
+    for (auto it = map_.begin(); it != map_.end(); )
+    {
+        const ModuleSymbols& ms = *it->second;
+        if (ms.status == SymStatus::Failed && !ms.permanent &&
+            (!cancelledOnly || ms.cancelled))
+        {
+            it = map_.erase(it);
+            ++dropped;
+        }
+        else
+            ++it;
+    }
+
+    // Jobs already queued carry the old settings.
+    if (!cancelledOnly)
+    {
+        const SymbolSettings cfg = jobSettings();
+        std::lock_guard<std::mutex> lk(mu_);
+        for (SymbolJob& job : queue_)
+            job.cfg = cfg;
+    }
+    return dropped;
+}
+
 bool SymbolStore::busy() const
 {
     std::lock_guard<std::mutex> lk(mu_);
@@ -228,6 +265,17 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
     req.cancel   = &prog_.cancel;
     memcpy(req.guid, job.ref.guid, sizeof(req.guid));
 
+    // Every failure exit goes through here, so a cancel isn't filed as "no PDB
+    // found". The flag is still up - the worker clears it on the next job.
+    auto giveUp = [this, &out]() -> ModuleSymbolsPtr {
+        if (prog_.cancel.load())
+        {
+            out->cancelled = true;
+            out->note      = "cancelled before a PDB was found";
+        }
+        return std::move(out);
+    };
+
     std::vector<std::string> candidates;
     if (!job.forcedPath.empty())
         candidates.push_back(job.forcedPath);
@@ -237,6 +285,8 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
 
     for (const std::string& path : candidates)
     {
+        if (prog_.cancel.load()) return giveUp();
+
         req.path = path;
         std::string err;
         if (load_pdb(req, out->syms, err))
@@ -252,7 +302,7 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
 
     // Nothing local matched. Servers are keyed by GUID, so whatever one returns
     // is the right build - trying them in turn is safe, the rest just 404.
-    if (!job.forcedPath.empty() || !job.cfg.useServer) return out;
+    if (!job.forcedPath.empty() || !job.cfg.useServer) return giveUp();
 
     for (const std::string& server : job.cfg.serverUrls)
     {
@@ -280,7 +330,7 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
         // A store that answers with a bad file is worth noting, but don't stop here.
         out->note = server + ": downloaded PDB is unusable: " + err;
     }
-    return out;
+    return giveUp();
 }
 
 } // namespace mem

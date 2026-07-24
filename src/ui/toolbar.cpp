@@ -139,14 +139,20 @@ void drawSettings(app::AppState& s)
 
                 mem::SymbolSettings& sym = s.symbols.settings();
 
-                if (ImGui::Checkbox("Load PDB symbols", &sym.enabled))
+                // Every edit below moves where a PDB is looked for.
+                auto searchChanged = [&s] {
+                    s.symbols.retryFailed(/*cancelledOnly=*/false);
                     app::saveConfig(s);
+                };
+
+                if (ImGui::Checkbox("Load PDB symbols", &sym.enabled))
+                    searchChanged();
                 ImGui::TextDisabled("Names functions, statics and data.");
 
                 ImGui::BeginDisabled(!sym.enabled);
 
                 if (ImGui::Checkbox("Download from the symbol server", &sym.useServer))
-                    app::saveConfig(s);
+                    searchChanged();
                 ImGui::TextDisabled("Fetches missing PDBs over the network.");
 
                 ImGui::Spacing();
@@ -156,7 +162,7 @@ void drawSettings(app::AppState& s)
                 if (ImGui::SmallButton("+"))
                 {
                     sym.serverUrls.emplace_back();
-                    app::saveConfig(s);
+                    searchChanged();
                 }
 
                 // Height hugs the rows, up to three, then scrolls. Add the
@@ -187,7 +193,7 @@ void drawSettings(app::AppState& s)
                     if (ImGui::InputTextWithHint("##url", "https://...",
                             urlBuf, sizeof(urlBuf)))
                         sym.serverUrls[i] = urlBuf;
-                    if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+                    if (ImGui::IsItemDeactivatedAfterEdit()) searchChanged();
 
                     ImGui::SameLine();
                     if (ImGui::Button("x", ImVec2(btnW, btnW))) removeAt = (int)i;
@@ -200,7 +206,7 @@ void drawSettings(app::AppState& s)
                 if (removeAt >= 0)
                 {
                     sym.serverUrls.erase(sym.serverUrls.begin() + removeAt);
-                    app::saveConfig(s);
+                    searchChanged();
                 }
 
                 ImGui::Text("Cache directory");
@@ -210,7 +216,7 @@ void drawSettings(app::AppState& s)
                 if (ImGui::InputTextWithHint("##symcache",
                         mem::default_symbol_cache().c_str(), cacheBuf, sizeof(cacheBuf)))
                     sym.cacheDir = cacheBuf;
-                if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+                if (ImGui::IsItemDeactivatedAfterEdit()) searchChanged();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(
                         "Point this at an existing x64dbg or WinDbg cache to\n"
@@ -223,7 +229,7 @@ void drawSettings(app::AppState& s)
                 if (ImGui::SmallButton("+##adddir"))
                 {
                     sym.extraDirs.emplace_back();
-                    app::saveConfig(s);
+                    searchChanged();
                 }
                 ImGui::TextDisabled("Checked for a PDB before the server.");
 
@@ -246,7 +252,7 @@ void drawSettings(app::AppState& s)
                     if (ImGui::InputTextWithHint("##dir", "C:\\symbols",
                             dirBuf, sizeof(dirBuf)))
                         sym.extraDirs[i] = dirBuf;
-                    if (ImGui::IsItemDeactivatedAfterEdit()) app::saveConfig(s);
+                    if (ImGui::IsItemDeactivatedAfterEdit()) searchChanged();
 
                     ImGui::SameLine();
                     if (ImGui::Button("x", ImVec2(btnW, btnW))) removeDir = (int)i;
@@ -258,7 +264,7 @@ void drawSettings(app::AppState& s)
                 if (removeDir >= 0)
                 {
                     sym.extraDirs.erase(sym.extraDirs.begin() + removeDir);
-                    app::saveConfig(s);
+                    searchChanged();
                 }
 
                 ImGui::EndDisabled();
