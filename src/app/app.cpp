@@ -9,6 +9,7 @@
 #include "memory/value_format.hpp"
 #include "memory/assembler.hpp"
 #include "memory/signature.hpp"
+#include "memory/driver/driver.hpp"
 #include <imgui.h>
 #include <imgui_internal.h> // DockBuilder* for the root dockspace layout
 #include <Zydis/Zydis.h>    // decode overwritten instructions for NOP-pad sizing
@@ -27,6 +28,8 @@ void App::setupStyle()
     // Restore persisted settings (theme) before the first style application.
     loadConfig(state_);
     applyTheme(state_, state_.darkTheme);
+    // Re-arm the persisted read/write backend and its status line.
+    applyBackend(state_);
 
     ImGuiStyle& style       = ImGui::GetStyle();
     style.WindowRounding    = 0.f;
@@ -201,6 +204,35 @@ void applyTheme(AppState& s, bool dark)
     // Disable the built-in modal dim (it darkens every viewport); we draw our
     // own over just the main window in drawFrame().
     style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0);
+}
+
+void applyBackend(AppState& s)
+{
+    if (!s.useKernelDriver)
+    {
+        mem::driver::stop();
+        s.driverStatus.clear();
+    }
+    else
+    {
+        // Installs/starts the driver service and registers mem::g_kernel; on
+        // failure attachToProcess below falls back to WinAPI on its own.
+        std::string status;
+        mem::driver::start(status);
+        s.driverStatus = status;
+    }
+
+    // Flipping proc.backend in place would leave a WinApi handle open-but-unused
+    // (switching to Kernel) or Kernel-mode calls running on a null handle
+    // (switching to WinApi) - re-attach so mem::open sets the backend up properly.
+    if (s.proc.is_open())
+    {
+        mem::ProcessEntry entry;
+        entry.pid  = s.proc.pid;
+        entry.name = s.proc.name;
+        entry.path = s.procIconPath;
+        attachToProcess(s, entry);
+    }
 }
 
 // Disassembly syntax colors. Dark is x64dbg's bundled Dark theme verbatim; light
@@ -459,16 +491,30 @@ void pollProcessAlive(AppState& s)
 
 bool attachToProcess(AppState& s, const mem::ProcessEntry& entry)
 {
+    // Backend::Kernel skips OpenProcess entirely (see mem::open), so it must be
+    // decided before opening, not patched onto the result afterward.
+    const mem::Backend backend = (s.useKernelDriver && mem::driver::active())
+        ? mem::Backend::Kernel : mem::Backend::WinApi;
+
     // Into a temporary handle, so a failed attach leaves the current one alone.
     mem::Process next;
-    if (!mem::open(next, entry.pid))
+    if (!mem::open(next, entry.pid, backend))
     {
-        const DWORD err = GetLastError();
-        snprintf(s.attachError, sizeof(s.attachError),
-            "Failed to attach to %s (PID: %lu) - error %lu",
-            entry.name.c_str(), entry.pid, (unsigned long)err);
-        printf("OpenProcess failed for %s (PID: %lu): error %lu\n",
-            entry.name.c_str(), entry.pid, (unsigned long)err);
+        if (backend == mem::Backend::Kernel)
+        {
+            snprintf(s.attachError, sizeof(s.attachError),
+                "Failed to attach to %s (PID: %lu) - process not found.",
+                entry.name.c_str(), entry.pid);
+        }
+        else
+        {
+            const DWORD err = GetLastError();
+            snprintf(s.attachError, sizeof(s.attachError),
+                "Failed to attach to %s (PID: %lu) - error %lu",
+                entry.name.c_str(), entry.pid, (unsigned long)err);
+            printf("OpenProcess failed for %s (PID: %lu): error %lu\n",
+                entry.name.c_str(), entry.pid, (unsigned long)err);
+        }
         return false;
     }
 

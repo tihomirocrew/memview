@@ -1,0 +1,45 @@
+;
+; memview.inf - install information for the MemView memory driver.
+;
+; The MemView app normally registers the driver itself through the Service Control
+; Manager, so this INF is optional. It's here to satisfy the WDK build and to allow
+; a manual install (right-click > Install, or pnputil) if you prefer.
+;
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+DriverVer   =
+CatalogFile = memview.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12   ; %SystemRoot%\System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+memview.sys = 1
+
+[DefaultInstall.NTamd64]
+CopyFiles = Drivers_Dir
+
+[DefaultInstall.NTamd64.Services]
+AddService = MemViewDrv,,MemView_Service_Inst
+
+[Drivers_Dir]
+memview.sys
+
+[MemView_Service_Inst]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1   ; SERVICE_KERNEL_DRIVER
+StartType     = 3   ; SERVICE_DEMAND_START
+ErrorControl  = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary = %12%\memview.sys
+
+[Strings]
+ManufacturerName = "MemView"
+DiskName         = "MemView Driver Install Disk"
+ServiceDesc      = "MemView Memory Driver"

@@ -90,6 +90,11 @@ struct AppState {
     bool showSettings = false;
     bool darkTheme    = false;  // false = light theme (default), true = dark
 
+    // Routes raw reads/writes through the driver's IOCTL client instead of
+    // Read/WriteProcessMemory when on; driverStatus explains the current state.
+    bool        useKernelDriver = false;
+    std::string driverStatus;
+
     // Memory View window. Both panes navigate independently; the Go bar seeds both.
     bool      showMemView  = false;
     uintptr_t disasmAddr   = 0;      // first visible disasm line

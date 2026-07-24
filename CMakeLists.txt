@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(memview VERSION 0.1.1 LANGUAGES CXX)
+project(memview VERSION 0.1.2 LANGUAGES CXX)
 
 configure_file(src/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h @ONLY)
 
@@ -47,6 +47,7 @@ add_executable(${PROJECT_NAME} WIN32
     src/memory/symbols/store.cpp
     src/app/app.cpp
     src/app/config.cpp
+    src/memory/driver/driver.cpp
     src/ui/toolbar.cpp
     src/ui/process_picker.cpp
     src/ui/scan_panel.cpp
@@ -61,7 +62,7 @@ add_executable(${PROJECT_NAME} WIN32
     ${ASMTK_DIR}/src/asmtk/asmtokenizer.cpp
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE src ${ASMTK_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_include_directories(${PROJECT_NAME} PRIVATE src ${ASMTK_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated ${CMAKE_CURRENT_SOURCE_DIR}/driver/src)
 
 # Compiling asmtk's sources into this target rather than a separate DLL, so
 # neutralize its dllimport/dllexport decoration. ASMJIT_STATIC matches how the
@@ -85,4 +86,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     comdlg32  # GetOpenFileName, for "Load PDB from File..."
     dwmapi
     winhttp
+    advapi32  # Service Control Manager, for loading the kernel driver
+    ntdll     # NtQuerySystemInformation, for list_processes()' handle-free path lookup
 )

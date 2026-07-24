@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <winternl.h>
 #include <tlhelp32.h>
 #include <cstdio>
 #include <cstring>
@@ -19,6 +20,10 @@ namespace mem {
 // Process
 // ============================================================================
 
+// WinApi uses a real process handle; Kernel routes everything through the
+// driver's IOCTL client instead and never opens a handle to the target.
+enum class Backend { WinApi, Kernel };
+
 struct ProcessEntry {
     DWORD       pid;
     std::string name;
@@ -26,12 +31,86 @@ struct ProcessEntry {
 };
 
 struct Process {
-    DWORD  pid    = 0;
-    HANDLE handle = nullptr;
-    char   name[MAX_PATH] = {};
+    DWORD   pid    = 0;
+    HANDLE  handle = nullptr;      // null in Backend::Kernel - no handle is held
+    char    name[MAX_PATH] = {};
+    Backend backend = Backend::WinApi;
 
-    bool is_open() const { return handle && handle != INVALID_HANDLE_VALUE; }
+    bool is_open() const
+    {
+        return backend == Backend::Kernel ? pid != 0 : (handle && handle != INVALID_HANDLE_VALUE);
+    }
 };
+
+// A loaded module (exe or dll) in the target process's address space.
+struct ModuleEntry {
+    uintptr_t   base;
+    size_t      size;
+    std::string name; // short file name, e.g. "ntdll.dll"
+    std::string path; // full path on disk, for the .pdb sitting next to it
+};
+
+struct Region {
+    uintptr_t base;
+    size_t    size;
+    DWORD     protect; // PAGE_READWRITE etc.
+    DWORD     type;    // MEM_IMAGE / MEM_MAPPED / MEM_PRIVATE
+    DWORD     state;   // MEM_COMMIT / MEM_FREE / MEM_RESERVE
+};
+
+// ============================================================================
+// Read/write backend
+// ============================================================================
+
+// Hooks the driver client (src/memory/driver) fills in when the kernel driver
+// loads, so memory.hpp itself stays free of any driver dependency. Only ever
+// called for a Process with backend == Backend::Kernel.
+struct KernelBackend {
+    size_t (*read)(DWORD pid, uintptr_t addr, void* buf, size_t n)       = nullptr;
+    size_t (*write)(DWORD pid, uintptr_t addr, const void* buf, size_t n) = nullptr;
+    bool   (*isAlive)(DWORD pid) = nullptr;
+    bool   (*isWow64)(DWORD pid) = nullptr;
+    std::vector<ModuleEntry> (*listModules)(DWORD pid) = nullptr;
+    bool   (*queryRegion)(DWORD pid, uintptr_t addr, Region& out) = nullptr;
+    bool   (*protect)(DWORD pid, uintptr_t addr, size_t n, DWORD newProtect, DWORD& oldProtect) = nullptr;
+
+    bool ready() const { return read && write; }
+};
+
+// Process-wide; the driver client sets/clears it on load/unload.
+inline KernelBackend g_kernel{};
+
+namespace detail {
+
+// Undocumented but stable (same technique Process Hacker etc. use) - only
+// NtQuerySystemInformation itself is declared in <winternl.h>, not this class.
+constexpr SYSTEM_INFORMATION_CLASS kSystemProcessIdInformation =
+    static_cast<SYSTEM_INFORMATION_CLASS>(88);
+
+struct SystemProcessIdInformation {
+    HANDLE         ProcessId;  // set before the call
+    UNICODE_STRING ImageName;  // caller supplies Buffer/MaximumLength; fills Length
+};
+
+// Maps an NT device path (\Device\HarddiskVolume3\...) back to a drive letter.
+// Rebuilt each call (26 cheap QueryDosDeviceW lookups) since letters can change.
+inline std::wstring nt_path_to_dos_path(const std::wstring& ntPath)
+{
+    for (wchar_t drive = L'A'; drive <= L'Z'; ++drive)
+    {
+        const wchar_t driveStr[3] = { drive, L':', 0 };
+        wchar_t       target[MAX_PATH];
+        if (QueryDosDeviceW(driveStr, target, MAX_PATH) == 0)
+            continue;
+
+        const size_t len = wcslen(target);
+        if (ntPath.size() > len && _wcsnicmp(ntPath.c_str(), target, len) == 0 && ntPath[len] == L'\\')
+            return std::wstring(driveStr, 2) + ntPath.substr(len);
+    }
+    return {};
+}
+
+} // namespace detail
 
 inline std::vector<ProcessEntry> list_processes()
 {
@@ -49,19 +128,25 @@ inline std::vector<ProcessEntry> list_processes()
             WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, buf, MAX_PATH, nullptr, nullptr);
             e.name = buf;
 
-            // Full path for the icon lookup; left empty when the process denies
-            // PROCESS_QUERY_LIMITED_INFORMATION (system/protected processes).
-            if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, e.pid))
+            // Full path for the icon lookup, without opening a handle to the process -
+            // matters for ones that deny even PROCESS_QUERY_LIMITED_INFORMATION.
+            detail::SystemProcessIdInformation info{};
+            info.ProcessId = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(e.pid));
+            wchar_t nameBuf[1024];
+            info.ImageName.Buffer        = nameBuf;
+            info.ImageName.MaximumLength = sizeof(nameBuf);
+
+            if (NtQuerySystemInformation(detail::kSystemProcessIdInformation, &info, sizeof(info), nullptr) >= 0
+                && info.ImageName.Length > 0)
             {
-                wchar_t pathW[MAX_PATH];
-                DWORD   len = MAX_PATH;
-                if (QueryFullProcessImageNameW(h, 0, pathW, &len))
+                const std::wstring ntPath(info.ImageName.Buffer, info.ImageName.Length / sizeof(wchar_t));
+                const std::wstring dosPath = detail::nt_path_to_dos_path(ntPath);
+                if (!dosPath.empty())
                 {
                     char pbuf[MAX_PATH];
-                    WideCharToMultiByte(CP_UTF8, 0, pathW, -1, pbuf, MAX_PATH, nullptr, nullptr);
+                    WideCharToMultiByte(CP_UTF8, 0, dosPath.c_str(), -1, pbuf, MAX_PATH, nullptr, nullptr);
                     e.path = pbuf;
                 }
-                CloseHandle(h);
             }
 
             out.push_back(std::move(e));
@@ -71,15 +156,28 @@ inline std::vector<ProcessEntry> list_processes()
     return out;
 }
 
-// SYNCHRONIZE is in the default access so is_alive() can wait on the handle.
-inline bool open(Process& proc, DWORD pid,
+// SYNCHRONIZE lets is_alive() wait on the handle (WinApi only) - Backend::Kernel
+// skips OpenProcess entirely and confirms the pid through the driver instead.
+inline bool open(Process& proc, DWORD pid, Backend backend = Backend::WinApi,
     DWORD access = PROCESS_VM_READ | PROCESS_VM_WRITE |
                    PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION |
                    SYNCHRONIZE)
 {
-    proc.handle = OpenProcess(access, FALSE, pid);
-    if (!proc.is_open()) return false;
-    proc.pid = pid;
+    if (backend == Backend::Kernel)
+    {
+        if (!g_kernel.isAlive || !g_kernel.isAlive(pid))
+            return false;
+        proc.handle  = nullptr;
+        proc.pid     = pid;
+        proc.backend = Backend::Kernel;
+    }
+    else
+    {
+        proc.handle = OpenProcess(access, FALSE, pid);
+        if (!proc.is_open()) return false;
+        proc.pid     = pid;
+        proc.backend = Backend::WinApi;
+    }
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE)
@@ -101,14 +199,14 @@ inline bool open(Process& proc, DWORD pid,
     return true;
 }
 
-inline bool open_by_name(Process& proc, const char* exe_name,
+inline bool open_by_name(Process& proc, const char* exe_name, Backend backend = Backend::WinApi,
     DWORD access = PROCESS_VM_READ | PROCESS_VM_WRITE |
                    PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION |
                    SYNCHRONIZE)
 {
     for (auto& e : list_processes())
         if (_stricmp(e.name.c_str(), exe_name) == 0)
-            return open(proc, e.pid, access);
+            return open(proc, e.pid, backend, access);
     return false;
 }
 
@@ -137,49 +235,33 @@ inline bool enable_debug_privilege()
     return ok;
 }
 
-// False once the target has exited. is_open() can't tell: the handle stays
-// valid as long as we hold it. A failed wait counts as alive.
+// False once the target has exited (is_open() alone can't tell - the handle/pid
+// stays valid until close()). A failed wait counts as alive.
 inline bool is_alive(const Process& proc)
 {
     if (!proc.is_open()) return false;
+    if (proc.backend == Backend::Kernel)
+        return g_kernel.isAlive && g_kernel.isAlive(proc.pid);
     return WaitForSingleObject(proc.handle, 0) != WAIT_OBJECT_0;
 }
 
 inline void close(Process& proc)
 {
-    if (proc.is_open()) { CloseHandle(proc.handle); proc.handle = nullptr; }
-    proc.pid = 0;
+    if (proc.handle && proc.handle != INVALID_HANDLE_VALUE)
+        CloseHandle(proc.handle);
+    proc.handle  = nullptr;
+    proc.pid     = 0;
     proc.name[0] = '\0';
+    proc.backend = Backend::WinApi;
 }
 
-// Base of the process's main module (the .exe), or 0 if unavailable. Toolhelp
-// always reports the executable first.
-inline uintptr_t main_module_base(const Process& proc)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(
-        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, proc.pid);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-
-    uintptr_t base = 0;
-    MODULEENTRY32W me = {}; me.dwSize = sizeof(me);
-    if (Module32FirstW(snap, &me))
-        base = reinterpret_cast<uintptr_t>(me.modBaseAddr);
-    CloseHandle(snap);
-    return base;
-}
-
-// A loaded module (exe or dll) in the target process's address space.
-struct ModuleEntry {
-    uintptr_t   base;
-    size_t      size;
-    std::string name; // short file name, e.g. "ntdll.dll"
-    std::string path; // full path on disk, for the .pdb sitting next to it
-};
-
-// Loaded modules in Toolhelp order (main .exe first). Used to label addresses
-// as "module+offset".
+// Loaded modules, main .exe first (Toolhelp order on WinApi; the driver's own
+// PEB walk is main-module-first too). Used to label addresses as "module+offset".
 inline std::vector<ModuleEntry> list_modules(const Process& proc)
 {
+    if (proc.backend == Backend::Kernel)
+        return g_kernel.listModules ? g_kernel.listModules(proc.pid) : std::vector<ModuleEntry>{};
+
     std::vector<ModuleEntry> out;
     HANDLE snap = CreateToolhelp32Snapshot(
         TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, proc.pid);
@@ -204,11 +286,43 @@ inline std::vector<ModuleEntry> list_modules(const Process& proc)
     return out;
 }
 
+// Base of the process's main module (the .exe), or 0 if unavailable.
+inline uintptr_t main_module_base(const Process& proc)
+{
+    const std::vector<ModuleEntry> mods = list_modules(proc);
+    return mods.empty() ? 0 : mods[0].base;
+}
+
 // True if the target is WOW64 (32-bit on 64-bit Windows), so disassemble as x86.
 inline bool is_wow64(const Process& proc)
 {
+    if (proc.backend == Backend::Kernel)
+        return g_kernel.isWow64 && g_kernel.isWow64(proc.pid);
     BOOL wow = FALSE;
     return IsWow64Process(proc.handle, &wow) && wow;
+}
+
+// Single choke point for reads: the kernel driver when loaded and selected, else
+// ReadProcessMemory. Every read path below funnels through here.
+inline size_t read_bytes(const Process& proc, uintptr_t addr, void* buf, size_t n)
+{
+    if (proc.backend == Backend::Kernel && g_kernel.read)
+        return g_kernel.read(proc.pid, addr, buf, n);
+
+    SIZE_T rd = 0;
+    ReadProcessMemory(proc.handle, reinterpret_cast<LPCVOID>(addr), buf, n, &rd);
+    return rd;
+}
+
+// Write counterpart of read_bytes; protection handling stays in write_raw.
+inline size_t write_bytes(const Process& proc, uintptr_t addr, const void* buf, size_t n)
+{
+    if (proc.backend == Backend::Kernel && g_kernel.write)
+        return g_kernel.write(proc.pid, addr, buf, n);
+
+    SIZE_T wr = 0;
+    WriteProcessMemory(proc.handle, reinterpret_cast<LPVOID>(addr), buf, n, &wr);
+    return wr;
 }
 
 // Read as many bytes as possible from `addr`, stopping at the first unreadable
@@ -223,9 +337,7 @@ inline size_t read_tolerant(const Process& proc, uintptr_t addr,
         // Clamp to the next page boundary so one bad page doesn't abort the rest.
         const size_t toBoundary = kPage - ((addr + done) & (kPage - 1));
         const size_t chunk = std::min<size_t>(toBoundary, n - done);
-        SIZE_T rd = 0;
-        ReadProcessMemory(proc.handle, reinterpret_cast<LPCVOID>(addr + done),
-            buf + done, chunk, &rd);
+        const size_t rd = read_bytes(proc, addr + done, buf + done, chunk);
         done += rd;
         if (rd != chunk) break; // hit an unreadable page
     }
@@ -238,26 +350,35 @@ inline size_t read_tolerant(const Process& proc, uintptr_t addr,
 
 inline bool read_raw(const Process& proc, uintptr_t addr, void* buf, size_t n)
 {
-    SIZE_T read = 0;
-    return ReadProcessMemory(proc.handle,
-        reinterpret_cast<LPCVOID>(addr), buf, n, &read) && read == n;
+    return read_bytes(proc, addr, buf, n) == n;
 }
 
 inline bool write_raw(const Process& proc, uintptr_t addr, const void* buf, size_t n)
 {
-    LPVOID target = reinterpret_cast<LPVOID>(addr);
-
-    SIZE_T written = 0;
-    if (WriteProcessMemory(proc.handle, target, buf, n, &written) && written == n)
+    if (write_bytes(proc, addr, buf, n) == n)
         return true;
 
-    // Retry after temporarily lifting page protection.
+    // Lift page protection and retry.
+    if (proc.backend == Backend::Kernel)
+    {
+        if (!g_kernel.protect) return false;
+        DWORD oldProtect = 0;
+        if (!g_kernel.protect(proc.pid, addr, n, PAGE_EXECUTE_READWRITE, oldProtect))
+            return false;
+
+        const bool ok = write_bytes(proc, addr, buf, n) == n;
+
+        DWORD tmp = 0;
+        g_kernel.protect(proc.pid, addr, n, oldProtect, tmp);
+        return ok;
+    }
+
+    LPVOID target = reinterpret_cast<LPVOID>(addr);
     DWORD oldProtect = 0;
     if (!VirtualProtectEx(proc.handle, target, n, PAGE_EXECUTE_READWRITE, &oldProtect))
         return false;
 
-    written = 0;
-    bool ok = WriteProcessMemory(proc.handle, target, buf, n, &written) && written == n;
+    const bool ok = write_bytes(proc, addr, buf, n) == n;
 
     DWORD tmp = 0;
     VirtualProtectEx(proc.handle, target, n, oldProtect, &tmp);
@@ -290,20 +411,28 @@ bool write(const Process& proc, uintptr_t addr, const T& value)
 // Memory regions
 // ============================================================================
 
-struct Region {
-    uintptr_t base;
-    size_t    size;
-    DWORD     protect; // PAGE_READWRITE etc.
-    DWORD     type;    // MEM_IMAGE / MEM_MAPPED / MEM_PRIVATE
-    DWORD     state;   // MEM_COMMIT / MEM_FREE / MEM_RESERVE
-};
-
 inline std::vector<Region> query_regions(const Process& proc, bool committed_only = true)
 {
     std::vector<Region> out;
     uintptr_t addr = 0;
-    MEMORY_BASIC_INFORMATION mbi;
 
+    if (proc.backend == Backend::Kernel)
+    {
+        if (!g_kernel.queryRegion) return out;
+
+        Region r{};
+        while (g_kernel.queryRegion(proc.pid, addr, r))
+        {
+            if (!committed_only || r.state == MEM_COMMIT)
+                out.push_back(r);
+            const uintptr_t next = r.base + r.size;
+            if (next <= addr) break; // no progress, or wrapped
+            addr = next;
+        }
+        return out;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi;
     while (VirtualQueryEx(proc.handle, reinterpret_cast<LPCVOID>(addr),
         &mbi, sizeof(mbi)) == sizeof(mbi))
     {
@@ -626,12 +755,9 @@ inline std::vector<ScanResult> scan_first(
         if (!is_scannable(region, wfilter, xfilter)) continue;
 
         chunk.resize(region.size);
-        SIZE_T got = 0;
-        if (ReadProcessMemory(proc.handle,
-            reinterpret_cast<LPCVOID>(region.base),
-            chunk.data(), region.size, &got))
+        if (read_bytes(proc, region.base, chunk.data(), region.size) == region.size)
         {
-            scanBuffer(region.base, chunk.data(), got);
+            scanBuffer(region.base, chunk.data(), region.size);
             continue;
         }
 
@@ -642,11 +768,8 @@ inline std::vector<ScanResult> scan_first(
         {
             if (cancelled()) return results;
             const size_t pageLen = std::min<size_t>(kPage, region.size - p);
-            SIZE_T pgot = 0;
-            if (ReadProcessMemory(proc.handle,
-                reinterpret_cast<LPCVOID>(region.base + p),
-                chunk.data(), pageLen, &pgot) && pgot)
-                scanBuffer(region.base + p, chunk.data(), pgot);
+            const size_t pgot = read_bytes(proc, region.base + p, chunk.data(), pageLen);
+            if (pgot) scanBuffer(region.base + p, chunk.data(), pgot);
         }
     }
     return results;
@@ -707,9 +830,7 @@ inline std::vector<ScanResult> scan_next(
         }
 
         // Refill the window starting at this address.
-        SIZE_T got = 0;
-        ReadProcessMemory(proc.handle, reinterpret_cast<LPCVOID>(r.address),
-            win.data(), kWindow, &got);
+        const size_t got = read_bytes(proc, r.address, win.data(), kWindow);
         if (got >= width)
         {
             winBase = r.address;

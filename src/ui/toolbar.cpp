@@ -62,7 +62,7 @@ void drawToolbar(app::AppState& s)
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!s.proc.is_open());
-    if (ImGui::Button("Structures"))
+    if (ImGui::Button("Structs"))
     {
         // Toggle: close if already open.
         if (s.showStructDissect) s.showStructDissect = false;
@@ -84,7 +84,7 @@ void drawSettings(app::AppState& s)
     // DWM-composition issue handled by cloaking in main.cpp, not by this seed.)
     const ImGuiViewport* mainVp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(mainVp->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(600, 512), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 410), ImGuiCond_FirstUseEver);
     // Always its own OS window: never dockable, never auto-merged into the main
     // window even when it overlaps.
     ImGuiWindowClass alwaysOwnWindow;
@@ -119,6 +119,20 @@ void drawSettings(app::AppState& s)
                     app::applyTheme(s, themeIdx == 1);
                     app::saveConfig(s);
                 }
+
+                ImGui::Spacing();
+                ImGui::SeparatorText("Memory access");
+
+                if (ImGui::Checkbox("Use kernel mode driver", &s.useKernelDriver))
+                {
+                    app::applyBackend(s);
+                    app::saveConfig(s);
+                }
+                ImGui::TextDisabled(
+                    "Read/write/query go through a kernel driver\n"
+                    "instead of usermode APIs. Needs admin rights.");
+                if (!s.driverStatus.empty())
+                    ImGui::TextDisabled("Status: %s", s.driverStatus.c_str());
 
                 ImGui::Spacing();
                 ImGui::SeparatorText("Symbols");

@@ -50,7 +50,8 @@ void loadConfig(AppState& s)
     // defaults rather than crashing at startup.
     try
     {
-        s.darkTheme = j.value("darkTheme", s.darkTheme);
+        s.darkTheme       = j.value("darkTheme", s.darkTheme);
+        s.useKernelDriver = j.value("useKernelDriver", s.useKernelDriver);
 
         mem::SymbolSettings& sym = s.symbols.settings();
         sym.enabled   = j.value("symbolsEnabled", sym.enabled);
@@ -78,6 +79,7 @@ void saveConfig(const AppState& s)
     const mem::SymbolSettings& sym = s.symbols.settings();
     const nlohmann::json j = {
         { "darkTheme",        s.darkTheme },
+        { "useKernelDriver",  s.useKernelDriver },
         { "symbolsEnabled",   sym.enabled },
         { "symbolServer",     sym.useServer },
         { "symbolServers",    sym.serverUrls },

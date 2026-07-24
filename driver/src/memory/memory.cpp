@@ -1,0 +1,253 @@
+#include "memory.hpp"
+#include "../nt/structs.hpp"
+
+namespace memview {
+namespace {
+
+// PEB.Ldr sits at a fixed, well-known offset; nothing before it is needed.
+constexpr SIZE_T kPebLdrOffset64 = 0x18;
+constexpr SIZE_T kPebLdrOffset32 = 0x0C;
+
+// Reference to a process looked up by PID. Released automatically on scope exit,
+// so every return path - including early ones - drops the reference exactly once.
+class ProcessRef
+{
+public:
+    explicit ProcessRef(HANDLE pid)
+    {
+        m_status = PsLookupProcessByProcessId(pid, &m_process);
+    }
+
+    ~ProcessRef()
+    {
+        if (m_process)
+            ObDereferenceObject(m_process);
+    }
+
+    ProcessRef(const ProcessRef&)            = delete;
+    ProcessRef& operator=(const ProcessRef&) = delete;
+
+    NTSTATUS status() const { return m_status; }
+    PEPROCESS get() const   { return m_process; }
+
+private:
+    PEPROCESS m_process = nullptr;
+    NTSTATUS  m_status  = STATUS_UNSUCCESSFUL;
+};
+
+// Plain ACCESS_MASK bit values for process rights - not in any kernel header
+// (only <winnt.h>, usermode-only), but these have never changed, so they're
+// safe to hardcode for ObOpenObjectByPointer's DesiredAccess below.
+constexpr ACCESS_MASK kProcessVmOperation      = 0x0008;
+constexpr ACCESS_MASK kProcessQueryInformation = 0x0400;
+
+// Kernel-minted handle (not a usermode OpenProcess), for one IOCTL call. Only
+// QueryRegion/ProtectMemory need this; everything else uses MmCopyVirtualMemory directly.
+class KernelProcessHandle
+{
+public:
+    KernelProcessHandle(PEPROCESS process, ACCESS_MASK access)
+    {
+        m_status = ObOpenObjectByPointer(process, OBJ_KERNEL_HANDLE, nullptr,
+            access, *PsProcessType, KernelMode, &m_handle);
+    }
+
+    ~KernelProcessHandle()
+    {
+        if (NT_SUCCESS(m_status))
+            ZwClose(m_handle);
+    }
+
+    KernelProcessHandle(const KernelProcessHandle&)            = delete;
+    KernelProcessHandle& operator=(const KernelProcessHandle&) = delete;
+
+    NTSTATUS status() const { return m_status; }
+    HANDLE   get() const    { return m_handle; }
+
+private:
+    HANDLE   m_handle = nullptr;
+    NTSTATUS m_status = STATUS_UNSUCCESSFUL;
+};
+
+// Reads cross-process into this (system) context; false on any short/failed copy.
+bool ReadRemote(PEPROCESS process, PVOID address, PVOID out, SIZE_T size)
+{
+    SIZE_T copied = 0;
+    return NT_SUCCESS(MmCopyVirtualMemory(process, address, PsGetCurrentProcess(),
+        out, size, KernelMode, &copied)) && copied == size;
+}
+
+// Walks one PEB_LDR_DATA.InMemoryOrderModuleList (native x64 layout).
+ULONG ListModulesNative(PEPROCESS process, PPEB peb, MEMVIEW_MODULE_INFO* out, ULONG maxCount)
+{
+    PVOID ldrPtr = nullptr;
+    if (!ReadRemote(process, reinterpret_cast<PUCHAR>(peb) + kPebLdrOffset64, &ldrPtr, sizeof(ldrPtr)) || !ldrPtr)
+        return 0;
+
+    PEB_LDR_DATA64 ldrData{};
+    if (!ReadRemote(process, ldrPtr, &ldrData, sizeof(ldrData)))
+        return 0;
+
+    const PUCHAR headAddr = reinterpret_cast<PUCHAR>(ldrPtr) + FIELD_OFFSET(PEB_LDR_DATA64, InMemoryOrderModuleList);
+    PUCHAR       current  = reinterpret_cast<PUCHAR>(ldrData.InMemoryOrderModuleList.Flink);
+
+    ULONG count = 0;
+    while (current != headAddr && count < maxCount)
+    {
+        PUCHAR entryBase = current - FIELD_OFFSET(LDR_DATA_TABLE_ENTRY64, InMemoryOrderLinks);
+
+        LDR_DATA_TABLE_ENTRY64 entry{};
+        if (!ReadRemote(process, entryBase, &entry, sizeof(entry)))
+            break;
+
+        MEMVIEW_MODULE_INFO& mod = out[count];
+        mod.base = reinterpret_cast<ULONGLONG>(entry.DllBase);
+        mod.size = entry.SizeOfImage;
+        RtlZeroMemory(mod.path, sizeof(mod.path));
+
+        const USHORT lenBytes = (entry.FullDllName.Length < sizeof(mod.path) - sizeof(wchar_t))
+            ? entry.FullDllName.Length : static_cast<USHORT>(sizeof(mod.path) - sizeof(wchar_t));
+        if (lenBytes && entry.FullDllName.Buffer)
+            ReadRemote(process, entry.FullDllName.Buffer, mod.path, lenBytes);
+
+        ++count;
+        current = reinterpret_cast<PUCHAR>(entry.InMemoryOrderLinks.Flink);
+    }
+    return count;
+}
+
+// Same walk, 32-bit pointer layout, for a WOW64 target's own PEB.
+ULONG ListModulesWow64(PEPROCESS process, PVOID wow64Peb, MEMVIEW_MODULE_INFO* out, ULONG maxCount)
+{
+    ULONG ldrPtr = 0;
+    if (!ReadRemote(process, reinterpret_cast<PUCHAR>(wow64Peb) + kPebLdrOffset32, &ldrPtr, sizeof(ldrPtr)) || !ldrPtr)
+        return 0;
+
+    PEB_LDR_DATA32 ldrData{};
+    if (!ReadRemote(process, reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(ldrPtr)), &ldrData, sizeof(ldrData)))
+        return 0;
+
+    const ULONG headAddr = ldrPtr + FIELD_OFFSET(PEB_LDR_DATA32, InMemoryOrderModuleList);
+    ULONG       current  = ldrData.InMemoryOrderModuleList.Flink;
+
+    ULONG count = 0;
+    while (current != headAddr && count < maxCount)
+    {
+        const ULONG entryBase = current - FIELD_OFFSET(LDR_DATA_TABLE_ENTRY32, InMemoryOrderLinks);
+
+        LDR_DATA_TABLE_ENTRY32 entry{};
+        if (!ReadRemote(process, reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(entryBase)), &entry, sizeof(entry)))
+            break;
+
+        MEMVIEW_MODULE_INFO& mod = out[count];
+        mod.base = entry.DllBase;
+        mod.size = entry.SizeOfImage;
+        RtlZeroMemory(mod.path, sizeof(mod.path));
+
+        const USHORT lenBytes = (entry.FullDllName.Length < sizeof(mod.path) - sizeof(wchar_t))
+            ? entry.FullDllName.Length : static_cast<USHORT>(sizeof(mod.path) - sizeof(wchar_t));
+        if (lenBytes && entry.FullDllName.Buffer)
+            ReadRemote(process, reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(entry.FullDllName.Buffer)), mod.path, lenBytes);
+
+        ++count;
+        current = entry.InMemoryOrderLinks.Flink;
+    }
+    return count;
+}
+
+} // namespace
+
+NTSTATUS ReadProcessMemory(HANDLE pid, PVOID address, PVOID out, SIZE_T size, PSIZE_T copied)
+{
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return target.status();
+
+    return MmCopyVirtualMemory(target.get(), address, PsGetCurrentProcess(), out,
+                                size, KernelMode, copied);
+}
+
+NTSTATUS WriteProcessMemory(HANDLE pid, PVOID address, PVOID in, SIZE_T size, PSIZE_T copied)
+{
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return target.status();
+
+    return MmCopyVirtualMemory(PsGetCurrentProcess(), in, target.get(), address,
+                                size, KernelMode, copied);
+}
+
+void QueryProcess(HANDLE pid, MEMVIEW_PROCESS_INFO& out)
+{
+    out.alive   = FALSE;
+    out.isWow64 = FALSE;
+
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return;
+
+    out.alive   = TRUE;
+    out.isWow64 = PsGetProcessWow64Process(target.get()) != nullptr;
+}
+
+ULONG ListModules(HANDLE pid, MEMVIEW_MODULE_INFO* out, ULONG maxCount)
+{
+    if (maxCount == 0)
+        return 0;
+
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return 0;
+
+    if (PVOID wow64Peb = PsGetProcessWow64Process(target.get()))
+        return ListModulesWow64(target.get(), wow64Peb, out, maxCount);
+
+    PPEB peb = PsGetProcessPeb(target.get());
+    if (!peb)
+        return 0;
+    return ListModulesNative(target.get(), peb, out, maxCount);
+}
+
+NTSTATUS QueryRegion(HANDLE pid, PVOID address, MEMVIEW_REGION_INFO& out)
+{
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return target.status();
+
+    KernelProcessHandle handle(target.get(), kProcessQueryInformation);
+    if (!NT_SUCCESS(handle.status()))
+        return handle.status();
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    SIZE_T returned = 0;
+    const NTSTATUS status = ZwQueryVirtualMemory(handle.get(), address,
+        MemoryBasicInformation, &mbi, sizeof(mbi), &returned);
+    if (!NT_SUCCESS(status))
+        return status;
+
+    out.base    = reinterpret_cast<ULONGLONG>(mbi.BaseAddress);
+    out.size    = mbi.RegionSize;
+    out.protect = mbi.Protect;
+    out.type    = mbi.Type;
+    out.state   = mbi.State;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS ProtectMemory(HANDLE pid, PVOID address, SIZE_T size, ULONG newProtect, ULONG& oldProtect)
+{
+    oldProtect = 0;
+
+    ProcessRef target(pid);
+    if (!NT_SUCCESS(target.status()))
+        return target.status();
+
+    KernelProcessHandle handle(target.get(), kProcessVmOperation);
+    if (!NT_SUCCESS(handle.status()))
+        return handle.status();
+
+    PVOID  base       = address;
+    SIZE_T regionSize = size;
+    return ZwProtectVirtualMemory(handle.get(), &base, &regionSize, newProtect, &oldProtect);
+}
+
+} // namespace memview

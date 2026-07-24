@@ -27,6 +27,10 @@ private:
 // Switch between the light/dark color scheme, reapplying setupStyle()'s tweaks.
 void applyTheme(AppState& s, bool dark);
 
+// Applies s.useKernelDriver to s.proc.backend, falling back to WinAPI (with the
+// reason in s.driverStatus) if the driver won't load. Safe with no process attached.
+void applyBackend(AppState& s);
+
 // Disassembly syntax colors (packed IM_COL32). Kept small; punctuation stays
 // in the theme text color so the listing doesn't turn into a christmas tree.
 struct DisasmPalette {
