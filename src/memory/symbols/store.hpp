@@ -10,15 +10,13 @@
 #include <unordered_set>
 #include <vector>
 
-#include "memory/pdb.hpp"
-#include "memory/symbol_server.hpp"
+#include "memory/symbols/pdb.hpp"
+#include "memory/symbols/server.hpp"
 
 // Per-module symbols, loaded off the UI thread.
 //
-// The split that keeps this safe: the caller reads everything that needs the
-// target process (the CodeView record, the section table) and puts it in a job.
-// The worker then only touches the file system and the network, so a process
-// that exits mid-load can't be read through a stale handle.
+// Kept safe by a split: the caller reads everything that needs the target process
+// (CodeView record, section table) into a job; the worker only touches disk/net.
 namespace mem {
 
 enum class SymStatus {
@@ -30,11 +28,8 @@ enum class SymStatus {
 };
 
 struct ModuleSymbols {
-    // The arena backing every string in `syms`. Declared first so it outlives
-    // them (members destruct in reverse order), and monotonic so freeing it is a
-    // handful of buffer releases regardless of how many symbols it holds. Its
-    // non-movable resource makes ModuleSymbols non-movable too - hence the
-    // unique_ptr in the maps below, so only pointers ever move.
+    // The arena behind every string in `syms`. Declared first so it outlives them;
+    // non-movable, so ModuleSymbols is too - hence the unique_ptr in the maps below.
     std::pmr::monotonic_buffer_resource arena;
 
     SymStatus   status = SymStatus::None;
@@ -43,25 +38,23 @@ struct ModuleSymbols {
     PdbSymbols  syms{&arena};
 };
 
-// Value type of the store's maps: the symbols are non-movable (arena), so they
-// live behind a pointer and only the pointer is ever handed around.
+// Value type of the store's maps: symbols are non-movable (arena), so they live
+// behind a pointer and only the pointer ever gets passed around.
 using ModuleSymbolsPtr = std::unique_ptr<ModuleSymbols>;
 
 struct SymbolSettings {
     bool enabled   = true;  // master switch for PDB symbols
     bool useServer = false; // off until the user opts in: it's network traffic
 
-    // Tried in order until one has the build. Microsoft's covers the system
-    // DLLs, Unity's covers Unity games. Same protocol as Mozilla, Chromium,
-    // NVIDIA and in-house stores, so the list is open-ended.
+    // Tried in order until one has the build: Microsoft's for system DLLs, Unity's
+    // for Unity games. Same protocol as Mozilla/Chromium/NVIDIA, so it's open-ended.
     std::vector<std::string> serverUrls{
         "https://msdl.microsoft.com/download/symbols",
         "https://symbolserver.unity3d.com",
     };
 
-    // Where downloads land, and the first place a local search looks. Worth
-    // pointing at an existing x64dbg/WinDbg cache: the on-disk layout is the
-    // same, so a cache built by another debugger is reused as-is.
+    // Where downloads land, and the first place a local search looks. Point it at
+    // an existing x64dbg/WinDbg cache and it's reused as-is - same on-disk layout.
     std::string cacheDir;          // empty -> default_symbol_cache()
     std::vector<std::string> extraDirs;
 };
@@ -104,8 +97,8 @@ public:
     void clear();
 
     // Cancel the batch in flight: abort the current download, empty the queue,
-    // and drop the queued-but-unstarted modules back to "never asked" so a later
-    // Load All re-queues them. The worker keeps running for the next request.
+    // and reset the queued-but-unstarted modules to "never asked" so a later
+    // Load All picks them up again. The worker stays alive for the next request.
     void cancelPending();
 
     bool                    busy() const;

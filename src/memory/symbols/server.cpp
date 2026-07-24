@@ -1,4 +1,4 @@
-#include "memory/symbol_server.hpp"
+#include "memory/symbols/server.hpp"
 
 #define NOMINMAX
 #include <windows.h>
@@ -32,9 +32,8 @@ std::string narrow(const std::wstring& s)
     return out;
 }
 
-// Like widen(), but opts a long absolute path out of MAX_PATH so a deep cache
-// or a user-picked PDB is still found on disk. Only for file-system calls, never
-// for the URL - a "\\?\" prefix is meaningless there.
+// widen(), but opts long absolute paths out of MAX_PATH so a deep cache or PDB
+// is still found. File-system paths only - "\\?\" is meaningless in a URL.
 std::wstring widen_path(const std::string& s)
 {
     std::wstring w = widen(s);
@@ -58,14 +57,12 @@ bool ensure_dir(const std::wstring& path)
     return true;
 }
 
-// A WinHTTP handle that closes itself on scope exit.
 struct Handle {
     HINTERNET h = nullptr;
     ~Handle() { if (h) WinHttpCloseHandle(h); }
     operator HINTERNET() const { return h; }
 };
 
-// A FILE* that closes itself on scope exit.
 struct FileOut {
     FILE* f = nullptr;
     ~FileOut() { if (f) fclose(f); }
@@ -76,9 +73,8 @@ struct FileOut {
 
 std::string pdb_key(const PdbRef& ref)
 {
-    // The 16 bytes are a GUID in memory: Data1 (u32) and Data2/Data3 (u16) are
-    // little-endian, Data4 is a plain byte array. The server path spells them
-    // out big-endian, so the first three fields swap.
+    // GUID in memory: Data1 (u32), Data2/Data3 (u16) are little-endian, Data4 a
+    // byte array. The server path spells them big-endian, so the first three swap.
     const uint8_t* g = ref.guid;
     char buf[48];
     snprintf(buf, sizeof(buf),
@@ -173,10 +169,8 @@ bool download_pdb(const std::string& serverUrl, const std::string& cacheDir,
         WINHTTP_NO_PROXY_BYPASS, 0)};
     if (!session) { error = "WinHttpOpen failed"; return false; }
 
-    // Bound every blocking phase (resolve, connect, send, receive). The cancel
-    // flag is only polled in the read loop below, and clear() joins this worker
-    // on process-exit/detach - without a ceiling, a dead or slow server would
-    // wedge that join for the WinHTTP defaults (~60s each on resolve+connect).
+    // Cap every blocking phase - the cancel flag is only polled in the read loop,
+    // so without these a dead server would wedge clear()'s join (~60s WinHTTP default).
     WinHttpSetTimeouts(session, 10000, 10000, 15000, 30000);
 
     Handle connect{WinHttpConnect(session, host, uc.nPort, 0)};
@@ -256,7 +250,7 @@ bool download_pdb(const std::string& serverUrl, const std::string& cacheDir,
             error = "the download was cut short";
             return false;
         }
-        if (got == 0) break; // end of body
+        if (got == 0) break;
 
         if (fwrite(buf.data(), 1, got, out.f) != got)
         {
@@ -269,7 +263,7 @@ bool download_pdb(const std::string& serverUrl, const std::string& cacheDir,
     }
     out.close();
 
-    // Rename last, so the cache only ever holds whole files.
+    // Rename last, so the cache only ever contains complete files.
     if (!MoveFileExW(wtmp.c_str(), wdest.c_str(), MOVEFILE_REPLACE_EXISTING))
     {
         DeleteFileW(wtmp.c_str());

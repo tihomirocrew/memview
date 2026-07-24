@@ -8,12 +8,9 @@
 #include <unordered_map>
 #include <vector>
 
-// Reads public symbols out of a .pdb: the MSF container, the DBI header, and the
-// symbol record stream. Only what it takes to name an address and to find an
-// address by name - types, locals and line info are ignored.
-//
-// Nothing here touches the target process: a caller collects the module's PDB
-// reference and section table first, then hands this plain data to a worker.
+// Reads public symbols out of a .pdb - enough to name an address and look one up
+// by name (walks the MSF container, DBI header and symbol stream; types, locals
+// and line info ignored). Touches no process memory: the caller hands it data.
 namespace mem {
 
 struct PdbSymbol {
@@ -26,8 +23,8 @@ struct PdbSymbol {
 // A module section as (rva, size), to turn a symbol's section:offset into an RVA.
 struct PdbSection { uint32_t rva; uint32_t size; };
 
-// Transparent hash/equality so byName can be looked up by std::string_view (or a
-// std::string) without materialising a std::pmr::string key just to search.
+// Transparent hash/equality: lets byName be searched by string_view without
+// building a throwaway std::pmr::string key for every lookup.
 struct SvHash {
     using is_transparent = void;
     size_t operator()(std::string_view s) const noexcept
@@ -39,14 +36,11 @@ struct SvEq {
     { return a == b; }
 };
 
-// All of a module's symbol strings live in one arena (see ModuleSymbols), so
-// these containers allocate from it, not the process heap - freeing the whole
-// module is then a couple of buffer releases, not a string free per symbol. The
-// resource is passed in at construction and must outlive the PdbSymbols.
+// Every string for a module lives in one arena (see ModuleSymbols), so dropping
+// the module is a few buffer releases, not a free per symbol. Must outlive this.
 struct PdbSymbols {
     std::pmr::vector<PdbSymbol> byRva;  // sorted by rva, then name
-    // lower-cased name -> rva. Mangled names are indexed alongside their
-    // undecorated form, so either spelling resolves.
+    // lower-cased name -> rva; mangled names indexed alongside the undecorated form.
     std::pmr::unordered_map<std::pmr::string, uint32_t, SvHash, SvEq> byName;
     // Display case, sorted case-insensitively, for the autocomplete's prefix scan.
     std::pmr::vector<std::pmr::string> names;
@@ -64,14 +58,13 @@ struct PdbLoadRequest {
     uint32_t                age      = 0;
     bool                    verify   = true; // reject a .pdb from another build
 
-    // Polled while parsing a large PDB, so a process that exits mid-load doesn't
-    // wedge the worker's join(). Null means the parse always runs to completion.
+    // Polled while parsing a large PDB so an exiting process doesn't wedge the
+    // worker's join(). Null means the parse always runs to completion.
     const std::atomic<bool>* cancel = nullptr;
 };
 
-// Parse `req.path` into `out`. False with `error` set when the file is missing,
-// malformed, stripped of symbols, belongs to a different build, or `req.cancel`
-// was raised while parsing.
+// Parse `req.path` into `out`. False + `error` when the file is missing, malformed,
+// stripped, from another build, or cancelled mid-parse.
 bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error);
 
 } // namespace mem

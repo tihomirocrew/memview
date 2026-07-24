@@ -4,10 +4,10 @@
 #include <vector>
 #include <unordered_map>
 #include "memory/memory.hpp"
-#include "memory/pe_symbols.hpp"
+#include "memory/pe.hpp"
 #include "memory/scan_session.hpp"
 #include "memory/dissect/def.hpp"
-#include "memory/symbol_store.hpp"
+#include "memory/symbols/store.hpp"
 
 namespace app {
 

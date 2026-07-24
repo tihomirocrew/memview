@@ -1,9 +1,8 @@
 #pragma once
 #include "memory.hpp"
 
-// Reads a module's PE export/import tables from the target's memory. Headers are
-// parsed by raw offset, not the IMAGE_NT_HEADERS structs, so 64-bit memview can
-// read a 32-bit (WOW64) target's PE32 layout.
+// Reads a module's PE tables (exports, imports, sections, debug records) from the
+// target's memory, all by raw offset - so 64-bit memview can read a WOW64 target.
 namespace mem {
 
 struct ExportSym {
@@ -19,9 +18,8 @@ struct Section {
     char      name[9]; // 8-char section name + NUL
 };
 
-// Identifies the .pdb a module was built with, from its CodeView debug record.
-// The (name, guid, age) triple is unique per build and is both the symbol-server
-// path and the check that a .pdb found on disk actually belongs to this binary.
+// Identifies the .pdb a module was built with (from its CodeView record). The
+// (name, guid, age) triple is unique per build - the server path and the match check.
 struct PdbRef {
     std::string name;     // "ntdll.pdb" (basename of origPath)
     std::string origPath; // path recorded at build time, often not on this machine
@@ -29,8 +27,7 @@ struct PdbRef {
     uint32_t    age      = 0;
 };
 
-// `target` is the resolved function (same address as its owning DLL's export);
-// `iatSlot` is the pointer cell the loader filled in inside the importing module.
+// `target` is the resolved function; `iatSlot` is the IAT cell the loader filled in.
 struct ImportSym {
     std::string name;    // empty when imported by ordinal
     std::string fromDll;
@@ -53,102 +50,131 @@ inline std::string read_cstr(const Process& proc, uintptr_t addr, size_t cap = 5
     return std::string(buf, len);
 }
 
-// Find data-directory entry `dirIndex` (0 = export, 1 = import): its RVA, size,
-// and the PE bitness. False on a malformed or unreadable header.
+// Decode one 40-byte IMAGE_SECTION_HEADER into an absolute VA range.
+inline Section parse_section_header(const uint8_t* hdr, uintptr_t modBase)
+{
+    Section s{};
+    memcpy(s.name, hdr, 8);
+    s.name[8] = '\0';
+    uint32_t vsize = 0, vaddr = 0;
+    memcpy(&vsize, hdr + 8,  4); // Misc.VirtualSize
+    memcpy(&vaddr, hdr + 12, 4); // VirtualAddress
+    s.base = modBase + vaddr;
+    // Page-align so a region split by protection still lands inside its section.
+    s.size = (vsize + 0xFFF) & ~(size_t)0xFFF;
+    return s;
+}
+
+// A module's PE headers, read once from its first page (that's where they all
+// live). Every parser below finds its data through this instead of re-walking.
+struct PeHeaders {
+    uint8_t  page[0x1000];
+    size_t   got     = 0;   // bytes read; the header page is one committed region
+    size_t   nt      = 0;   // offset of "PE\0\0" within page
+    bool     valid   = false;
+    bool     is64    = false;
+    uint16_t numSecs = 0;
+    uint16_t optSize = 0;
+
+    uint16_t u16(size_t off) const
+    { uint16_t v = 0; if (off + 2 <= got) memcpy(&v, page + off, 2); return v; }
+    uint32_t u32(size_t off) const
+    { uint32_t v = 0; if (off + 4 <= got) memcpy(&v, page + off, 4); return v; }
+
+    // { rva, size } of data-directory entry `i` (0 = export, 1 = import, 6 =
+    // debug), or {0, 0} when the optional header doesn't reach that far.
+    void data_dir(int i, uint32_t& rva, uint32_t& size) const
+    {
+        const uint32_t ddOff = is64 ? 112 : 96; // DataDirectory[0] in the optional header
+        const size_t   slot  = nt + 24 + ddOff + (size_t)i * 8;
+        rva  = u32(slot);
+        size = u32(slot + 4);
+    }
+};
+
+// Read and validate a module's header page; `valid` is false on a non-PE image.
+inline PeHeaders read_pe_headers(const Process& proc, uintptr_t modBase)
+{
+    PeHeaders h;
+    h.got = read_tolerant(proc, modBase, h.page, sizeof(h.page));
+    if (h.got < 0x40 || h.u16(0) != 0x5A4D) return h;       // "MZ"
+
+    const int32_t lfanew = (int32_t)h.u32(0x3C);
+    if (lfanew <= 0 || (size_t)lfanew + 24 > h.got) return h;
+    h.nt = (size_t)lfanew;
+    if (h.u32(h.nt) != 0x00004550) return h;                // "PE\0\0"
+
+    h.numSecs = h.u16(h.nt + 6);              // IMAGE_FILE_HEADER.NumberOfSections
+    h.optSize = h.u16(h.nt + 20);             // .SizeOfOptionalHeader
+    h.is64    = (h.u16(h.nt + 24) == 0x20B);  // optional header magic: PE32+ vs PE32
+    h.valid   = true;
+    return h;
+}
+
+// Decode the section table from an already-read header page. Empty if it spills
+// past the page (~90+ sections) or the count is bogus; read_sections handles that.
+inline void parse_sections(const PeHeaders& h, uintptr_t modBase,
+    std::vector<Section>& out)
+{
+    out.clear();
+    if (!h.valid || h.numSecs == 0 || h.numSecs > 96) return; // PE caps sections at 96
+
+    // Section headers follow the optional header: 4 (sig) + 20 (file header).
+    const size_t secTable = h.nt + 24 + h.optSize;
+    if (secTable + (size_t)h.numSecs * 40 > h.got) return;    // 40 = sizeof(IMAGE_SECTION_HEADER)
+
+    out.reserve(h.numSecs);
+    for (uint16_t i = 0; i < h.numSecs; ++i)
+        out.push_back(parse_section_header(h.page + secTable + (size_t)i * 40, modBase));
+}
+
+// Data-directory entry `dirIndex` (0 = export, 1 = import): RVA, size, bitness.
+// False only on a non-PE module; a missing entry returns true with zero rva/size.
 inline bool find_data_dir(const Process& proc, uintptr_t modBase, int dirIndex,
     uint32_t& dirRva, uint32_t& dirSize, bool& is64)
 {
-    uint16_t mz = 0;
-    if (!read_raw(proc, modBase, &mz, sizeof(mz)) || mz != 0x5A4D) // "MZ"
-        return false;
-
-    int32_t lfanew = 0;
-    if (!read_raw(proc, modBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew <= 0)
-        return false;
-
-    const uintptr_t nt = modBase + (uint32_t)lfanew;
-    uint32_t sig = 0;
-    if (!read_raw(proc, nt, &sig, sizeof(sig)) || sig != 0x00004550) // "PE\0\0"
-        return false;
-
-    // Optional header magic decides the data-directory offset (PE32 vs PE32+).
-    const uintptr_t opt = nt + 4 + 20; // skip Signature + IMAGE_FILE_HEADER
-    uint16_t magic = 0;
-    if (!read_raw(proc, opt, &magic, sizeof(magic))) return false;
-    is64 = (magic == 0x20B);
-    const uint32_t ddOff = is64 ? 112 : 96; // offset of DataDirectory[0] in the optional header
-
-    uint32_t dd[2] = {0, 0}; // { VirtualAddress, Size }
-    if (!read_raw(proc, opt + ddOff + (uintptr_t)dirIndex * 8, dd, sizeof(dd)))
-        return false;
-    dirRva  = dd[0];
-    dirSize = dd[1];
+    const PeHeaders h = read_pe_headers(proc, modBase);
+    if (!h.valid) return false;
+    is64 = h.is64;
+    h.data_dir(dirIndex, dirRva, dirSize);
     return true;
 }
 
 } // namespace detail
 
-// Sections of `mod`, in header order (.text, .rdata, ...). Parsed by raw offset
-// like the export/import tables, so it works on a 32-bit (WOW64) target too.
+// Sections of `mod`, in header order (.text, .rdata, ...).
 inline std::vector<Section> read_sections(const Process& proc, const ModuleEntry& mod)
 {
+    const detail::PeHeaders h = detail::read_pe_headers(proc, mod.base);
     std::vector<Section> out;
-
-    uint16_t mz = 0;
-    if (!read_raw(proc, mod.base, &mz, sizeof(mz)) || mz != 0x5A4D) // "MZ"
+    detail::parse_sections(h, mod.base, out);
+    if (!out.empty() || !h.valid || h.numSecs == 0 || h.numSecs > 96)
         return out;
 
-    int32_t lfanew = 0;
-    if (!read_raw(proc, mod.base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew <= 0)
-        return out;
-
-    const uintptr_t nt = mod.base + (uint32_t)lfanew;
-    uint32_t sig = 0;
-    if (!read_raw(proc, nt, &sig, sizeof(sig)) || sig != 0x00004550) // "PE\0\0"
-        return out;
-
-    // IMAGE_FILE_HEADER (at nt+4): NumberOfSections @ +2, SizeOfOptionalHeader @ +16.
-    uint16_t numSecs = 0, optSize = 0;
-    if (!read_raw(proc, nt + 6,  &numSecs, sizeof(numSecs)) ||
-        !read_raw(proc, nt + 20, &optSize, sizeof(optSize)))
-        return out;
-    if (numSecs == 0 || numSecs > 96) return out; // PE caps sections at 96
-
-    // Section headers follow the optional header: 4 (sig) + 20 (file header).
-    const uintptr_t secTable = nt + 24 + optSize;
-    out.reserve(numSecs);
-    for (uint16_t i = 0; i < numSecs; ++i)
+    // Table spilled past the header page (~90+ sections); read those directly.
+    const size_t secTable = h.nt + 24 + h.optSize;
+    out.reserve(h.numSecs);
+    for (uint16_t i = 0; i < h.numSecs; ++i)
     {
-        uint8_t hdr[40]; // sizeof(IMAGE_SECTION_HEADER)
-        if (!read_raw(proc, secTable + (uintptr_t)i * 40, hdr, sizeof(hdr))) break;
-
-        Section s{};
-        memcpy(s.name, hdr, 8);
-        s.name[8] = '\0';
-        uint32_t vsize = 0, vaddr = 0;
-        memcpy(&vsize, hdr + 8,  4); // Misc.VirtualSize
-        memcpy(&vaddr, hdr + 12, 4); // VirtualAddress
-        s.base = mod.base + vaddr;
-        // Page-align so a region split by protection still lands inside its section.
-        s.size = (vsize + 0xFFF) & ~(size_t)0xFFF;
-        out.push_back(s);
+        uint8_t hdr[40];
+        if (!read_raw(proc, mod.base + secTable + (uintptr_t)i * 40, hdr, sizeof(hdr)))
+            break;
+        out.push_back(detail::parse_section_header(hdr, mod.base));
     }
     return out;
 }
 
 namespace detail {
 
-// Parse the CodeView PDB reference out of a module's debug directory, given the
-// directory's RVA and size (data-directory entry 6). Reads the whole entry array
-// in one shot, then the one RSDS record it points at - two reads, versus a read
-// per entry and per field. False when there's no CODEVIEW record.
+// Pull the CodeView PDB reference out of the debug directory (data-dir entry 6).
+// One read for the entry array, one for the RSDS record. False if there's none.
 inline bool read_pdb_ref_from_dir(const Process& proc, const ModuleEntry& mod,
     uint32_t dirRva, uint32_t dirSize, PdbRef& out)
 {
     if (dirRva == 0 || dirSize < 28) return false;
 
-    // IMAGE_DEBUG_DIRECTORY is 28 bytes: Characteristics, TimeDateStamp,
-    // MajorVersion, MinorVersion, Type, SizeOfData, AddressOfRawData, PointerToRawData.
+    // Each IMAGE_DEBUG_DIRECTORY entry is 28 bytes; we want Type (@12) and
+    // AddressOfRawData (@20).
     uint32_t n = dirSize / 28;
     if (n > 64) n = 64;
     uint8_t dir[28 * 64];
@@ -182,9 +208,8 @@ inline bool read_pdb_ref_from_dir(const Process& proc, const ModuleEntry& mod,
         out.name = slash == std::string::npos ? out.origPath
                                               : out.origPath.substr(slash + 1);
 
-        // This name goes into a cache path and a server URL, and it comes from
-        // the target's own headers - strip path/URL metacharacters so a hostile
-        // module can't smuggle any in. A real PDB name never has them.
+        // Goes into a cache path and a server URL, straight from the target's own
+        // headers - strip path/URL metacharacters a hostile module might smuggle in.
         for (char& c : out.name)
         {
             const unsigned char u = (unsigned char)c;
@@ -199,8 +224,8 @@ inline bool read_pdb_ref_from_dir(const Process& proc, const ModuleEntry& mod,
 
 } // namespace detail
 
-// The .pdb `mod` was built with, from its debug directory. False when the module
-// carries no CodeView record - most Microsoft binaries do, stripped ones don't.
+// The .pdb `mod` was built with. False when it carries no CodeView record
+// (stripped binaries).
 inline bool read_pdb_ref(const Process& proc, const ModuleEntry& mod, PdbRef& out)
 {
     uint32_t dirRva = 0, dirSize = 0;
@@ -210,79 +235,31 @@ inline bool read_pdb_ref(const Process& proc, const ModuleEntry& mod, PdbRef& ou
     return detail::read_pdb_ref_from_dir(proc, mod, dirRva, dirSize, out);
 }
 
-// Reads the section table and the CodeView PDB reference off a module in one go,
-// so a bulk "load all" doesn't cost ~25 tiny reads per module. The PE headers
-// live in the image's first page, so one read covers the sections and the
-// debug-directory slot; the debug records and CodeView record are read after.
-//
-// `sections` is filled when the headers parse; `hasRef`/`outRef` only when a
-// CodeView record is present. False means the PE headers were unreadable.
+// Section table + CodeView PDB reference in one page read (a bulk "load all"
+// would otherwise be ~25 tiny reads/module). False if the headers won't read.
 inline bool read_symbol_inputs(const Process& proc, const ModuleEntry& mod,
     std::vector<Section>& sections, PdbRef& outRef, bool& hasRef)
 {
     hasRef = false;
     sections.clear();
 
-    uint8_t hdr[0x1000];
-    const size_t got = read_tolerant(proc, mod.base, hdr, sizeof(hdr));
-    if (got < 0x40) return false;
+    const detail::PeHeaders h = detail::read_pe_headers(proc, mod.base);
+    if (!h.valid) return false;
 
-    auto u16 = [&](size_t off) -> uint16_t { uint16_t v; memcpy(&v, hdr + off, 2); return v; };
-    auto u32 = [&](size_t off) -> uint32_t { uint32_t v; memcpy(&v, hdr + off, 4); return v; };
-
-    if (u16(0) != 0x5A4D) return false;                    // "MZ"
-    const int32_t lfanew = (int32_t)u32(0x3C);
-    if (lfanew <= 0 || (size_t)lfanew + 24 > got) return false;
-
-    const size_t nt = (size_t)lfanew;
-    if (u32(nt) != 0x00004550) return false;               // "PE\0\0"
-
-    const uint16_t numSecs = u16(nt + 6);   // IMAGE_FILE_HEADER.NumberOfSections
-    const uint16_t optSize = u16(nt + 20);  // .SizeOfOptionalHeader
-    const uint16_t magic   = u16(nt + 24);  // optional header magic
-    const bool     is64    = (magic == 0x20B);
-    const uint32_t ddOff   = is64 ? 112 : 96;
-
-    // Section table: right after the optional header. Parsed from the buffer when
-    // it fits (it does for all but pathological section counts); otherwise fall
-    // back to the per-section reader.
-    const size_t secTable = nt + 24 + optSize;
-    if (numSecs && numSecs <= 96 && secTable + (size_t)numSecs * 40 <= got)
-    {
-        sections.reserve(numSecs);
-        for (uint16_t i = 0; i < numSecs; ++i)
-        {
-            const uint8_t* h = hdr + secTable + (size_t)i * 40;
-            Section s{};
-            memcpy(s.name, h, 8);
-            s.name[8] = '\0';
-            uint32_t vsize = 0, vaddr = 0;
-            memcpy(&vsize, h + 8,  4); // Misc.VirtualSize
-            memcpy(&vaddr, h + 12, 4); // VirtualAddress
-            s.base = mod.base + vaddr;
-            s.size = (vsize + 0xFFF) & ~(size_t)0xFFF;
-            sections.push_back(s);
-        }
-    }
-    else
-    {
+    detail::parse_sections(h, mod.base, sections);
+    // Only a ~90+ section module spills past the header page; read those directly.
+    if (sections.empty() && h.numSecs != 0 && h.numSecs <= 96)
         sections = read_sections(proc, mod);
-    }
 
-    // Debug directory = data-directory entry 6. Its slot sits in the buffer; the
-    // records it points at generally don't, so read_pdb_ref_from_dir fetches them.
-    const size_t ddSlot = nt + 24 + ddOff + 6 * 8;
-    if (ddSlot + 8 <= got)
-    {
-        const uint32_t dbgRva  = u32(ddSlot);
-        const uint32_t dbgSize = u32(ddSlot + 4);
-        hasRef = detail::read_pdb_ref_from_dir(proc, mod, dbgRva, dbgSize, outRef);
-    }
+    // Debug directory = data-directory entry 6. Its slot is in the header page;
+    // the records it points at usually aren't, so read_pdb_ref_from_dir fetches them.
+    uint32_t dbgRva = 0, dbgSize = 0;
+    h.data_dir(6, dbgRva, dbgSize);
+    hasRef = detail::read_pdb_ref_from_dir(proc, mod, dbgRva, dbgSize, outRef);
     return true;
 }
 
-// Named exports of `mod`, resolved to absolute addresses. Forwarded exports
-// (which point at a "Dll.Func" redirect string rather than code) are skipped.
+// Named exports of `mod`, resolved to absolute addresses. Forwarders are skipped.
 inline std::vector<ExportSym> read_exports(const Process& proc, const ModuleEntry& mod)
 {
     std::vector<ExportSym> out;
@@ -304,7 +281,7 @@ inline std::vector<ExportSym> read_exports(const Process& proc, const ModuleEntr
         !read_raw(proc, dir + 36, &rvaOrds, 4))
         return out;
 
-    // Sanity clamp so a corrupt header can't drive a giant allocation.
+    // Clamp so a corrupt header can't drive a giant allocation.
     if (numNames == 0 || numNames > 1'000'000 || numFuncs > 1'000'000) return out;
 
     std::vector<uint32_t> nameRvas(numNames);
@@ -354,11 +331,11 @@ inline std::vector<ImportSym> read_imports(const Process& proc, const ModuleEntr
             !read_raw(proc, desc + 12, &nameRva,    4) ||
             !read_raw(proc, desc + 16, &firstThunk, 4))
             break;
-        if (origThunk == 0 && nameRva == 0 && firstThunk == 0) break; // terminator
+        if (origThunk == 0 && nameRva == 0 && firstThunk == 0) break;
 
         const std::string dll = detail::read_cstr(proc, mod.base + nameRva, 256);
-        // Names come from the INT (OriginalFirstThunk); the IAT (FirstThunk) holds
-        // the resolved pointers. Fall back to the IAT for names if the INT is absent.
+        // Names live in the INT (OriginalFirstThunk), resolved pointers in the
+        // IAT (FirstThunk). If the INT is missing, read names from the IAT.
         const uint32_t intRva = origThunk ? origThunk : firstThunk;
 
         for (uint32_t i = 0; i < 65536; ++i)

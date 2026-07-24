@@ -1,4 +1,4 @@
-#include "memory/pdb.hpp"
+#include "memory/symbols/pdb.hpp"
 
 #define NOMINMAX // keep windows.h's min/max macros away from std::min
 #include <windows.h>
@@ -18,8 +18,8 @@ constexpr size_t kMagicLen   = sizeof(kMsfMagic) - 1;
 // Reject absurd sizes so a corrupt header can't ask for a giant mapping.
 constexpr uint64_t kMaxPdbSize = 2ull * 1024 * 1024 * 1024;
 
-// UTF-8 path -> UTF-16. A long absolute path gets the "\\?\" prefix so it isn't
-// capped at MAX_PATH (260 chars).
+// UTF-8 path -> UTF-16. Long absolute paths get the "\\?\" prefix so they dodge
+// the MAX_PATH (260 char) limit.
 std::wstring widen_path(const std::string& s)
 {
     if (s.empty()) return {};
@@ -33,7 +33,7 @@ std::wstring widen_path(const std::string& s)
     return w;
 }
 
-// Maps the file read-only, so reading a stream is just memcpy - no seeking.
+// File mapped read-only, so reading a stream is just a memcpy - no seeking.
 struct MappedFile {
     HANDLE         file    = INVALID_HANDLE_VALUE;
     HANDLE         mapping = nullptr;
@@ -76,14 +76,13 @@ struct MappedFile {
 uint32_t read_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
 uint16_t read_u16(const uint8_t* p) { uint16_t v; memcpy(&v, p, 2); return v; }
 
-// Blocks needed to hold `bytes`.
 uint32_t block_count(uint32_t bytes, uint32_t blockSize)
 {
     return (bytes + blockSize - 1) / blockSize;
 }
 
-// The MSF container: the file is split into blocks, and a "stream" is just a
-// list of block indices. Everything below reads streams, not file offsets.
+// The MSF container: the file is chopped into fixed-size blocks, and a "stream"
+// is just a list of block indices. Everything below reads streams, not offsets.
 struct Msf {
     const uint8_t* data = nullptr;
     size_t         size = 0;
@@ -143,7 +142,7 @@ struct Msf {
             return false;
         }
 
-        // The stream directory is itself a stream, whose block list sits in
+        // The stream directory is itself a stream; its block list sits in
         // consecutive blocks starting at blockMapAddr.
         const uint32_t dirBlocks = block_count(numDirBytes, blockSize);
         const uint64_t mapOff    = (uint64_t)blockMapAddr * blockSize;
@@ -206,8 +205,8 @@ struct Msf {
     }
 };
 
-// dbghelp's UnDecorateSymbolName, loaded on first use. The only bit of dbghelp
-// we need - no SymInitialize, no symsrv.dll to ship.
+// dbghelp's UnDecorateSymbolName, loaded lazily on first use. The only piece of
+// dbghelp we touch - no SymInitialize, no symsrv.dll to ship alongside.
 using UndecorateFn = DWORD (WINAPI*)(PCSTR, PSTR, DWORD, DWORD);
 
 std::string undecorate(const std::string& name)
@@ -220,8 +219,7 @@ std::string undecorate(const std::string& name)
     }();
     if (!undname) return name;
 
-    // Drop the noise we don't need, but keep the qualified name and parameters
-    // so overloads stay distinct.
+    // Strip noise but keep the qualified name and parameters, so overloads differ.
     constexpr DWORD kFlags =
         UNDNAME_NO_MS_KEYWORDS | UNDNAME_NO_ACCESS_SPECIFIERS |
         UNDNAME_NO_MEMBER_TYPE | UNDNAME_NO_FUNCTION_RETURNS |
@@ -253,8 +251,8 @@ bool less_nocase(const std::pmr::string& a, const std::pmr::string& b)
 
 bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
 {
-    // `out` is already bound to its module's arena; reset the contents without
-    // touching the allocator. All symbol strings below are built on this arena.
+    // `out` is already bound to its module's arena; clear the contents without
+    // disturbing the allocator. Every symbol string below is built on that arena.
     out.byRva.clear();
     out.byName.clear();
     out.names.clear();
@@ -272,8 +270,7 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
     msf.size = file.size;
     if (!msf.parse(error)) return false;
 
-    // Stream 1 (PDB info) identifies the build: u32 version, u32 signature,
-    // u32 age, then the 16-byte GUID.
+    // Stream 1 (PDB info): u32 version, signature, age, then the 16-byte GUID.
     if (req.verify)
     {
         std::vector<uint8_t> info;
@@ -282,8 +279,8 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
             error = "corrupt PDB (no info stream)";
             return false;
         }
-        // Only the GUID decides. Age gets bumped by incremental linking and can
-        // run ahead of the module's, so we don't check it.
+        // Only the GUID decides. Incremental linking bumps the age, so it can
+        // run ahead of the module's - checking it would reject good PDBs.
         if (memcmp(info.data() + 12, req.guid, 16) != 0)
         {
             error = "PDB is from a different build of this module";
@@ -318,20 +315,17 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
         return false;
     }
 
-    // Cheap poll of the cancel flag: an atomic load per record would be waste, so
-    // only every few thousand. Enough that a mid-parse cancel is seen in well
-    // under a frame, even on a PDB with hundreds of thousands of publics.
+    // Cheap cancel poll - every few thousand records, not every one. Still lands a
+    // mid-parse cancel in well under a frame on a PDB with 100k+ publics.
     auto cancelled = [&req](size_t n) {
         return (n & 0x1FFF) == 0 && req.cancel &&
                req.cancel->load(std::memory_order_relaxed);
     };
 
-    // Records are { u16 length; u16 kind; payload }, where length covers the
-    // kind and payload but not itself.
+    // Records are { u16 length; u16 kind; payload }; length excludes itself.
     out.byRva.reserve(syms.size() / 48);
-    // Sized up front so the mangled-name inserts below and the second index pass
-    // don't trigger a run of rehashes mid-load - that rehash churn is the worker's
-    // heaviest heap traffic, and it contends with the render thread's allocations.
+    // Reserve up front so the inserts below don't set off a run of rehashes -
+    // that churn is the worker's heaviest heap traffic, contending with render.
     out.byName.reserve(syms.size() / 24);
     size_t recNo = 0;
     for (size_t off = 0; off + 4 <= syms.size(); ++recNo)
@@ -379,8 +373,8 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
 
         out.byRva.push_back({sec.rva + symOff, 0, isFunc,
             std::pmr::string(demangled.data(), demangled.size(), mr)});
-        // Index the mangled spelling too, but only when it differs from the
-        // undecorated name (C names and data are already plain).
+        // Index the mangled spelling too, but only when it actually differs
+        // (C names and data are already plain).
         if (mangled != demangled)
         {
             const std::string low = lower_copy(mangled);
@@ -395,8 +389,8 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
         return false;
     }
 
-    // The sorts and index builds below are the other slow half of a big load;
-    // bail before each so a cancel never waits out more than one of them.
+    // The sorts and index builds are the other slow half of a big load; bail
+    // before each so a cancel never has to wait out more than one of them.
     if (req.cancel && req.cancel->load(std::memory_order_relaxed))
     {
         error = "cancelled";
@@ -408,8 +402,8 @@ bool load_pdb(const PdbLoadRequest& req, PdbSymbols& out, std::string& error)
             return a.rva != b.rva ? a.rva < b.rva : a.name < b.name;
         });
 
-    // Publics carry no size, so each symbol runs to the next one, capped at its
-    // own section end (otherwise the last .text symbol would cover all of .data).
+    // Publics carry no size, so each symbol runs up to the next one, capped at
+    // its section end - else the last .text symbol would swallow all of .data.
     for (size_t i = 0; i < out.byRva.size(); ++i)
     {
         PdbSymbol& s = out.byRva[i];

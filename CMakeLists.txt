@@ -42,9 +42,9 @@ add_executable(${PROJECT_NAME} WIN32
     src/memory/value_format.cpp
     src/memory/scan_session.cpp
     src/memory/signature.cpp
-    src/memory/pdb.cpp
-    src/memory/symbol_server.cpp
-    src/memory/symbol_store.cpp
+    src/memory/symbols/pdb.cpp
+    src/memory/symbols/server.cpp
+    src/memory/symbols/store.cpp
     src/app/app.cpp
     src/app/config.cpp
     src/ui/toolbar.cpp

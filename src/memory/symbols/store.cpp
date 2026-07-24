@@ -1,4 +1,4 @@
-#include "memory/symbol_store.hpp"
+#include "memory/symbols/store.hpp"
 
 #define NOMINMAX
 #include <windows.h>
@@ -10,12 +10,8 @@
 namespace mem {
 namespace {
 
-// Free a whole symbol map off the render thread. Each module's strings live in
-// its own monotonic arena, so destroying a ModuleSymbols is a couple of buffer
-// releases, not a free per symbol - the whole map is a few hundred frees total.
-// That no longer lags the UI, but it's still handed to a detached thread so the
-// caller (onProcessExited, on the render thread) returns immediately. The move
-// into the thread is O(1); the data references nothing outside itself.
+// Free a symbol map off the render thread. Each module owns a monotonic arena, so
+// freeing is cheap - detached only so onProcessExited returns to the UI at once.
 void reapAsync(std::unordered_map<uintptr_t, ModuleSymbolsPtr>&& doomed)
 {
     std::thread([garbage = std::move(doomed)]() mutable {
@@ -33,10 +29,8 @@ void SymbolStore::ensureWorker()
     stop_ = false;
     worker_ = std::thread(&SymbolStore::workerMain, this);
 
-    // Below-normal so a long parse (a big PDB pins a core) never steals the
-    // scheduler from the render thread - the whole point is that loading symbols
-    // stays invisible. Not BACKGROUND_BEGIN: that also drops memory priority and
-    // would drag the parse itself out badly.
+    // Below-normal so a big-PDB parse never starves the render thread. Not
+    // BACKGROUND_BEGIN: that drops memory priority and drags the parse out badly.
     SetThreadPriority(worker_.native_handle(), THREAD_PRIORITY_BELOW_NORMAL);
 }
 
@@ -59,7 +53,7 @@ void SymbolStore::request(SymbolJob job, bool force)
 
     {
         std::lock_guard<std::mutex> lk(mu_);
-        // A forced reload drops any pending job for the same module first, so
+        // A forced reload first drops any pending job for the same module, so
         // Reload pressed twice doesn't parse the same PDB twice.
         if (force)
             for (auto it = queue_.begin(); it != queue_.end(); )
@@ -97,9 +91,8 @@ bool SymbolStore::pump()
         inflight_.erase(base);
     }
 
-    // The worker can't touch map_ (main thread only), so flip the module it's
-    // working on right now to Loading here. A result that landed above already
-    // set the final status and wins.
+    // The worker can't touch map_ (main-thread only), so flip the in-progress
+    // module to Loading here. A result that landed above already won.
     if (active)
         if (auto it = map_.find(active);
             it != map_.end() && it->second->status == SymStatus::Queued)
@@ -123,7 +116,7 @@ void SymbolStore::clear()
             stop_ = true;
             queue_.clear();
         }
-        // Cancel any download in flight, or the join below waits for megabytes.
+        // Cancel any download in flight, else the join below waits for megabytes.
         prog_.cancel.store(true);
         cv_.notify_all();
         worker_.join();
@@ -138,21 +131,18 @@ void SymbolStore::clear()
     }
     inflight_.clear(); // main-thread only, like map_ below
 
-    // clear() runs from onProcessExited on the render thread. Each module's
-    // symbols sit in their own arena, so freeing them is cheap now - but still do
-    // it on a detached thread so this call returns to the UI at once even after a
+    // Detach the free so onProcessExited returns to the UI at once even after a
     // "Load All" of ~100 modules. The move into reapAsync is O(1).
     if (!map_.empty())
         reapAsync(std::move(map_));
-    map_.clear(); // moved-from map back to a defined empty state
+    map_.clear(); // defined state after move
 }
 
 void SymbolStore::cancelPending()
 {
-    // Empty the queue and cancel the in-flight download, both under the lock the
-    // worker takes to pop a job - so a job popped in the same instant still sees
-    // the cancel instead of slipping past. The worker clears the flag on its next
-    // job; the aborted module lands as Failed("cancelled").
+    // Both under the lock the worker pops jobs with, so a job popped in the same
+    // instant still sees the cancel. The worker clears the flag on its next job;
+    // the aborted module lands as Failed("cancelled").
     std::deque<SymbolJob> dropped;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -160,8 +150,8 @@ void SymbolStore::cancelPending()
         prog_.cancel.store(true);
     }
 
-    // map_/inflight_ are main-thread only, so clearing the dropped modules here
-    // is safe. Otherwise they'd stay "queued" and request() wouldn't re-queue them.
+    // map_/inflight_ are main-thread only, so clearing the dropped modules here is
+    // safe - otherwise they'd stay "queued" and request() wouldn't re-queue them.
     for (const SymbolJob& job : dropped)
     {
         map_.erase(job.modBase);
@@ -201,15 +191,14 @@ void SymbolStore::workerMain()
             active_     = job.modName;
             activeBase_ = job.modBase;
 
-            // Clear a leftover cancel from a previous cancelPending(), under the
-            // same lock it sets the flag with - so a Cancel arriving right as this
-            // job is popped is honoured, not lost. (clear() returns above, so its
-            // cancel flag survives for the join.)
+            // Clear a leftover cancel under the same lock cancelPending() sets it,
+            // so a Cancel racing this pop is honoured. (clear() returned earlier,
+            // so its flag survives for the join.)
             prog_.cancel.store(false);
         }
 
-        // Reset the byte counters per job: a job that loads locally never touches
-        // the download path, and stale totals would mislabel it as "Downloading".
+        // Reset the byte counters per job: a local load never touches the
+        // download path, and stale totals would mislabel it as "Downloading".
         prog_.received.store(0);
         prog_.total.store(0);
 
@@ -234,8 +223,8 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
     req.sections = job.sections;
     req.age      = job.ref.age;
     req.verify   = job.verify;
-    // Same flag the download loop watches: clear() raises it on process-exit so a
-    // parse in flight bails instead of holding the UI thread on worker_.join().
+    // Same flag the download loop watches: clear() raises it on exit so a parse
+    // in flight bails instead of pinning the UI thread on worker_.join().
     req.cancel   = &prog_.cancel;
     memcpy(req.guid, job.ref.guid, sizeof(req.guid));
 
@@ -257,13 +246,12 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
             out->note.clear();
             return out;
         }
-        // Keep the last reason: with several candidates, the one that came
-        // closest to working is the useful thing to show.
+        // Keep the last reason - the candidate closest to working is most useful.
         out->note = path + ": " + err;
     }
 
-    // Nothing local matched. Servers are keyed by GUID, so anything one returns
-    // is the right build - trying them in a row is safe, the rest just 404.
+    // Nothing local matched. Servers are keyed by GUID, so whatever one returns
+    // is the right build - trying them in turn is safe, the rest just 404.
     if (!job.forcedPath.empty() || !job.cfg.useServer) return out;
 
     for (const std::string& server : job.cfg.serverUrls)
@@ -289,8 +277,7 @@ ModuleSymbolsPtr SymbolStore::runJob(const SymbolJob& job)
             out->note.clear();
             return out;
         }
-        // A server that answers with an unusable file is worth reporting, but
-        // shouldn't stop the ones behind it.
+        // A store that answers with a bad file is worth noting, but don't stop here.
         out->note = server + ": downloaded PDB is unusable: " + err;
     }
     return out;

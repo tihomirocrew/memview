@@ -19,13 +19,13 @@ A lightweight process memory scanner/editor for Windows.
 
 - **Memory Scanning** - first/next scan by value and type
 - **Address List** - saved addresses with descriptions and types
+- **Structure Dissector** - rebuild structures over memory, named from RTTI, exported as C++
 - **Hex View** and **Disassembly** - live memory viewing with syntax highlighting
 - **Regions** - a map of the process's memory regions
 - **Modules** - a list of the process's loaded modules
 - **Assembler/Disassembler** - edit instructions on the fly (asmjit + Zydis), NOP-fill
 - **Signatures** - AOB signature generation
 - **Symbols** - PDB symbols per module, from disk or symbol server
-- **Structure Dissector** - rebuild structures over memory, named from RTTI, exported as C++
 
 ## requirements
 
